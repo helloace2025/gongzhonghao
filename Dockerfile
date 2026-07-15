@@ -1,4 +1,4 @@
-# Railway 友好单阶段构建（SQLite + 持久卷 /data）
+# Railway 友好单阶段构建（SQLite 数据目录固定 /data）
 FROM node:20-alpine
 
 RUN apk add --no-cache openssl libc6-compat python3 make g++
@@ -10,13 +10,10 @@ RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 ENV PNPM_IGNORE_ENGINE=true \
     CI=true
 
-# 先拷全部源码（含 prisma schema）
 COPY . .
 
-# 安装依赖时跳过 lifecycle
 RUN pnpm install --no-frozen-lockfile --ignore-scripts
 
-# 先 prisma generate，再 build
 WORKDIR /app/apps/server
 RUN pnpm exec prisma generate --schema ./prisma/schema.prisma
 
@@ -25,9 +22,11 @@ RUN pnpm --filter web build
 RUN pnpm --filter server build
 
 WORKDIR /app/apps/server
-RUN chmod +x docker-bootstrap.sh
+RUN chmod +x docker-bootstrap.sh \
+  && mkdir -p /data
 
-# 数据库写在 /data（请在 Railway 挂载 Volume 到 /data，否则 redeploy 会丢数据）
+# 重要：在 Railway 面板 → Volumes → Add Volume → Mount path 填 /data
+# 否则每次 redeploy 数据会丢失
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=4000 \
@@ -39,7 +38,6 @@ ENV NODE_ENV=production \
 
 EXPOSE 4000
 
-# 声明数据目录（Railway Volume 挂载点）
 VOLUME ["/data"]
 
 CMD ["sh", "docker-bootstrap.sh"]

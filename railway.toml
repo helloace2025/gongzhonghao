@@ -6,3 +6,8 @@ dockerfilePath = "Dockerfile"
 healthcheckPath = "/"
 healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
+
+# 默认环境变量（仍须在面板给服务添加 Volume，挂载到 /data）
+[variables]
+DATABASE_TYPE = "sqlite"
+DATABASE_URL = "file:/data/wewe-rss.db"
