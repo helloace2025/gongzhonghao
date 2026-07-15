@@ -1,49 +1,46 @@
-# 简化版 Docker 构建：默认 SQLite，适配 Railway / Zeabur 等平台
-FROM node:20.16.0-alpine
+# Railway / 云平台友好的单阶段构建（SQLite）
+FROM node:20-alpine
 
-RUN apk add --no-cache openssl libc6-compat
+# 基础依赖（Prisma 等需要）
+RUN apk add --no-cache openssl libc6-compat python3 make g++
 
-ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
-# 容器内没有 vscode，避免 engine-strict 导致 install 失败
-ENV PNPM_IGNORE_ENGINE=true
+WORKDIR /app
 
-RUN npm i -g pnpm@9.15.9
+# 全局 pnpm，忽略 engines 检查
+RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
+ENV PNPM_IGNORE_ENGINE=true \
+    CI=true \
+    NODE_ENV=development
 
-WORKDIR /usr/src/app
-
-# 先拷依赖描述，利用层缓存
+# 拷贝 monorepo 描述文件
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
-COPY apps/server/package.json ./apps/server/
-COPY apps/web/package.json ./apps/web/
+COPY apps/server/package.json apps/server/
+COPY apps/web/package.json apps/web/
 
-RUN pnpm install --frozen-lockfile
+# 不使用 frozen-lockfile，避免 lock 与环境细微差异导致失败
+RUN pnpm install --no-frozen-lockfile
 
+# 拷贝源码
 COPY . .
 
-# 构建前端（输出到 apps/server/client）+ 后端
-RUN pnpm --filter web build && pnpm --filter server build
-
-WORKDIR /usr/src/app/apps/server
-
-# 生成 Prisma Client（当前 prisma 目录为 SQLite schema）
-RUN pnpm exec prisma generate
-
-RUN mkdir -p /usr/src/app/apps/server/data \
-  && chmod +x ./docker-bootstrap.sh
-
+# 生产构建
 ENV NODE_ENV=production
-ENV HOST=0.0.0.0
-ENV PORT=4000
-ENV DATABASE_TYPE=sqlite
-ENV DATABASE_URL="file:../data/wewe-rss.db"
-ENV AUTH_CODE=""
-ENV MAX_REQUEST_PER_MINUTE=60
-ENV SERVER_ORIGIN_URL=""
+RUN pnpm --filter web build
+RUN pnpm --filter server build
+RUN cd apps/server && pnpm exec prisma generate
+
+# 运行时
+WORKDIR /app/apps/server
+RUN mkdir -p data && chmod +x docker-bootstrap.sh
+
+ENV HOST=0.0.0.0 \
+    PORT=4000 \
+    DATABASE_TYPE=sqlite \
+    DATABASE_URL="file:../data/wewe-rss.db" \
+    AUTH_CODE="" \
+    MAX_REQUEST_PER_MINUTE=60 \
+    SERVER_ORIGIN_URL=""
 
 EXPOSE 4000
 
-# 持久化目录：部署平台请挂载 /usr/src/app/apps/server/data
-VOLUME ["/usr/src/app/apps/server/data"]
-
-CMD ["./docker-bootstrap.sh"]
+CMD ["sh", "docker-bootstrap.sh"]

@@ -11,13 +11,16 @@
   },
   "scripts": {
     "dev": "pnpm run --parallel dev",
+    "build": "pnpm --filter web build && pnpm --filter server build && pnpm --filter server exec prisma generate",
     "build:server": "pnpm --filter server build",
     "build:web": "pnpm --filter web build",
+    "start": "cd apps/server && mkdir -p data && npx prisma migrate deploy && node dist/main",
     "start:server": "pnpm --filter server start:prod",
     "start:web": "pnpm --filter web start",
     "fmt": "prettier --write .",
     "fmt.check": "prettier --check ."
   },
+  "packageManager": "pnpm@9.15.9",
   "devDependencies": {
     "prettier": "^3.2.5"
   }

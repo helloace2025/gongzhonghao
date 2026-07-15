@@ -1,16 +1,15 @@
 #!/bin/sh
 set -e
 
-cd /usr/src/app/apps/server
+cd /app/apps/server 2>/dev/null || cd "$(dirname "$0")"
 
-# 确保数据目录存在（SQLite 文件写在这里）
 mkdir -p ./data
 
-echo "DATABASE_TYPE=${DATABASE_TYPE:-sqlite}"
-echo "Running prisma migrate deploy..."
+echo "[bootstrap] cwd=$(pwd)"
+echo "[bootstrap] DATABASE_URL=${DATABASE_URL}"
+echo "[bootstrap] prisma migrate deploy..."
 
-# 使用环境变量中的 DATABASE_URL 执行迁移
 npx prisma migrate deploy --schema ./prisma/schema.prisma
 
-echo "Starting server..."
+echo "[bootstrap] starting node dist/main"
 exec node dist/main

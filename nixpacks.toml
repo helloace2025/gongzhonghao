@@ -1,0 +1,24 @@
+# Railway Nixpacks 备用方案（面板 Builder 选 Nixpacks 时使用）
+providers = ["node"]
+
+[variables]
+NODE_ENV = "production"
+PNPM_IGNORE_ENGINE = "true"
+DATABASE_TYPE = "sqlite"
+DATABASE_URL = "file:../data/wewe-rss.db"
+
+[phases.setup]
+nixPkgs = ["nodejs_20", "openssl"]
+
+[phases.install]
+cmds = ["npm i -g pnpm@9.15.9", "pnpm install --no-frozen-lockfile"]
+
+[phases.build]
+cmds = [
+  "pnpm --filter web build",
+  "pnpm --filter server build",
+  "cd apps/server && pnpm exec prisma generate"
+]
+
+[start]
+cmd = "cd apps/server && mkdir -p data && npx prisma migrate deploy && node dist/main"
