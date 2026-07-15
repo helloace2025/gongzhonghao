@@ -560,25 +560,27 @@ export class TrpcRouter {
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       });
     }),
-    /** 手动写入/补齐种子标签（可重复调用） */
+    /**
+     * 仅在「标签表完全为空」时初始化种子标签。
+     * 不会恢复用户已删除的标签（避免刷新后又冒出来）。
+     */
     seed: this.trpcService.protectedProcedure.mutation(async () => {
-      let created = 0;
+      const count = await this.prismaService.tag.count();
+      if (count > 0) {
+        const items = await this.prismaService.tag.findMany({
+          orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+        });
+        return { created: 0, total: items.length, items, skipped: true };
+      }
       for (let i = 0; i < SEED_TAGS.length; i++) {
-        const name = SEED_TAGS[i];
-        const before = await this.prismaService.tag.findUnique({
-          where: { name },
+        await this.prismaService.tag.create({
+          data: { name: SEED_TAGS[i], sortOrder: i },
         });
-        await this.prismaService.tag.upsert({
-          where: { name },
-          create: { name, sortOrder: i },
-          update: { sortOrder: i },
-        });
-        if (!before) created += 1;
       }
       const items = await this.prismaService.tag.findMany({
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
       });
-      return { created, total: items.length, items };
+      return { created: items.length, total: items.length, items, skipped: false };
     }),
     create: this.trpcService.protectedProcedure
       .input(z.object({ name: z.string().min(1).max(32) }))

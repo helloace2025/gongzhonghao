@@ -61,7 +61,6 @@ const Feeds = () => {
     undefined,
     { refetchOnWindowFocus: true },
   );
-  const { mutateAsync: seedTags } = trpc.tag.seed.useMutation({});
   const { mutateAsync: createTag } = trpc.tag.create.useMutation({});
   const { mutateAsync: deleteTag, isLoading: isDeleteTagLoading } =
     trpc.tag.delete.useMutation({});
@@ -120,14 +119,6 @@ const Feeds = () => {
   const [localFeeds, setLocalFeeds] = useState<FeedItem[]>([]);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
-
-  // 首次进入时确保对标 PDF 标签已写入
-  useEffect(() => {
-    seedTags()
-      .then(() => refetchTags())
-      .catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // 切换订阅源时清空阅读器选中
   useEffect(() => {
