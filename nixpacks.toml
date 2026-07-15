@@ -1,11 +1,12 @@
-# Railway Nixpacks 备用方案（面板 Builder 选 Nixpacks 时使用）
+# Railway Nixpacks 备用（面板 Builder 选 Nixpacks 时使用）
 providers = ["node"]
 
 [variables]
 NODE_ENV = "production"
 PNPM_IGNORE_ENGINE = "true"
 DATABASE_TYPE = "sqlite"
-DATABASE_URL = "file:../data/wewe-rss.db"
+# 必须配合 Volume 挂载到 /data
+DATABASE_URL = "file:/data/wewe-rss.db"
 
 [phases.setup]
 nixPkgs = ["nodejs_20", "openssl"]
@@ -21,4 +22,4 @@ cmds = [
 ]
 
 [start]
-cmd = "cd apps/server && mkdir -p data && npx prisma migrate deploy && node dist/main"
+cmd = "cd apps/server && sh docker-bootstrap.sh"
