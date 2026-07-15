@@ -1,3 +1,115 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ========== Claude 风格全局底色与排版 ========== */
+:root {
+  --claude-canvas: #f5f4ef;
+  --claude-sidebar: #f0eee6;
+  --claude-paper: #fffcf7;
+  --claude-border: #e5e3d9;
+  --claude-ink: #1a1915;
+  --claude-muted: #6e6a5e;
+  --claude-accent: #c96442;
+  --claude-accent-soft: #f3e4dc;
+  --claude-hover: #ebe8df;
+}
+
+.dark {
+  --claude-canvas: #1a1917;
+  --claude-sidebar: #22211e;
+  --claude-paper: #262522;
+  --claude-border: #3a3732;
+  --claude-ink: #f5f4ef;
+  --claude-muted: #a89f8a;
+  --claude-accent: #d18466;
+  --claude-accent-soft: #3d2a22;
+  --claude-hover: #2f2d29;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--claude-canvas);
+    color: var(--claude-ink);
+    font-family:
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      'PingFang SC',
+      'Hiragino Sans GB',
+      'Microsoft YaHei',
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: var(--claude-accent-soft);
+    color: var(--claude-ink);
+  }
+
+  /* 可滚动，但不显示滚动条（侧栏 / 文章列表 / 阅读区等） */
+  * {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* IE / old Edge */
+  }
+
+  *::-webkit-scrollbar {
+    width: 0 !important;
+    height: 0 !important;
+    display: none !important;
+    background: transparent;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+}
+
+@layer components {
+  .claude-panel {
+    @apply bg-[var(--claude-paper)] border-[var(--claude-border)];
+  }
+
+  .claude-sidebar {
+    background: var(--claude-sidebar);
+    border-color: var(--claude-border);
+  }
+
+  .claude-nav {
+    background: rgba(245, 244, 239, 0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--claude-border);
+  }
+
+  .dark .claude-nav {
+    background: rgba(26, 25, 23, 0.88);
+  }
+
+  .claude-item-active {
+    background: var(--claude-accent-soft) !important;
+    color: var(--claude-accent) !important;
+  }
+
+  .claude-item-hover:hover {
+    background: var(--claude-hover);
+  }
+}

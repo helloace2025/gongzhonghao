@@ -4,19 +4,66 @@ import { TrpcService } from '@server/trpc/trpc.service';
 import * as trpcExpress from '@trpc/server/adapters/express';
 import { TRPCError } from '@trpc/server';
 import { PrismaService } from '@server/prisma/prisma.service';
-import { statusMap } from '@server/constants';
-import { ConfigService } from '@nestjs/config';
-import { ConfigurationType } from '@server/configuration';
+import { statusMap, SEED_TAGS } from '@server/constants';
 
 @Injectable()
 export class TrpcRouter {
   constructor(
     private readonly trpcService: TrpcService,
     private readonly prismaService: PrismaService,
-    private readonly configService: ConfigService,
   ) {}
 
   private readonly logger = new Logger(this.constructor.name);
+
+  /** 确保标签存在，返回 id 列表（按名称去重） */
+  private async ensureTagsByNames(names: string[]) {
+    const cleaned = [
+      ...new Set(
+        names
+          .map((n) => (n || '').trim())
+          .filter((n) => n.length > 0 && n.length <= 32),
+      ),
+    ];
+    if (!cleaned.length) return [] as { id: string; name: string }[];
+
+    const result: { id: string; name: string }[] = [];
+    for (const name of cleaned) {
+      const tag = await this.prismaService.tag.upsert({
+        where: { name },
+        create: { name },
+        update: {},
+      });
+      result.push({ id: tag.id, name: tag.name });
+    }
+    return result;
+  }
+
+  /** 设置某公众号的标签（全量替换） */
+  private async setFeedTags(feedId: string, tagNames: string[]) {
+    const tags = await this.ensureTagsByNames(tagNames);
+    await this.prismaService.feedTag.deleteMany({ where: { feedId } });
+    for (const t of tags) {
+      await this.prismaService.feedTag.create({
+        data: { feedId, tagId: t.id },
+      });
+    }
+    return tags;
+  }
+
+  private mapFeedWithTags<
+    T extends {
+      tags?: { tag: { id: string; name: string } }[];
+    },
+  >(feed: T) {
+    const { tags, ...rest } = feed as any;
+    return {
+      ...rest,
+      tags: (tags || []).map((ft: any) => ({
+        id: ft.tag.id,
+        name: ft.tag.name,
+      })),
+    };
+  }
 
   accountRouter = this.trpcService.router({
     list: this.trpcService.protectedProcedure
@@ -138,35 +185,53 @@ export class TrpcRouter {
         z.object({
           limit: z.number().min(1).max(1000).nullish(),
           cursor: z.string().nullish(),
+          /** 按标签名筛选；不传则返回全部 */
+          tag: z.string().nullish(),
         }),
       )
       .query(async ({ input }) => {
         const limit = input.limit ?? 1000;
-        const { cursor } = input;
+        const { cursor, tag } = input;
 
         const items = await this.prismaService.feed.findMany({
           take: limit + 1,
-          where: {},
+          where: tag
+            ? {
+                tags: {
+                  some: {
+                    tag: { name: tag },
+                  },
+                },
+              }
+            : {},
           cursor: cursor
             ? {
                 id: cursor,
               }
             : undefined,
-          orderBy: {
-            createdAt: 'asc',
+          include: {
+            tags: {
+              include: { tag: true },
+            },
           },
+          orderBy: [
+            {
+              sortOrder: 'asc',
+            },
+            {
+              createdAt: 'asc',
+            },
+          ],
         });
         let nextCursor: typeof cursor | undefined = undefined;
         if (items.length > limit) {
-          // Remove the last item and use it as next cursor
-
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
           const nextItem = items.pop()!;
           nextCursor = nextItem.id;
         }
 
         return {
-          items: items,
+          items: items.map((f) => this.mapFeedWithTags(f)),
           nextCursor,
         };
       }),
@@ -175,6 +240,9 @@ export class TrpcRouter {
       .query(async ({ input: id }) => {
         const feed = await this.prismaService.feed.findUnique({
           where: { id },
+          include: {
+            tags: { include: { tag: true } },
+          },
         });
         if (!feed) {
           throw new TRPCError({
@@ -182,7 +250,7 @@ export class TrpcRouter {
             message: `No feed with id '${id}'`,
           });
         }
-        return feed;
+        return this.mapFeedWithTags(feed);
       }),
     add: this.trpcService.protectedProcedure
       .input(
@@ -197,19 +265,37 @@ export class TrpcRouter {
             .default(Math.floor(Date.now() / 1e3)),
           updateTime: z.number(),
           status: z.number().default(statusMap.ENABLE),
+          /** 导入时可选绑定标签名 */
+          tags: z.array(z.string()).optional(),
         }),
       )
       .mutation(async ({ input }) => {
-        const { id, ...data } = input;
+        const { id, tags: tagNames, ...data } = input;
+        const maxOrder = await this.prismaService.feed.aggregate({
+          _max: { sortOrder: true },
+        });
+        const nextOrder = (maxOrder._max.sortOrder ?? -1) + 1;
+        const { tags: _t, ...createData } = input as any;
         const feed = await this.prismaService.feed.upsert({
           where: {
             id,
           },
           update: data,
-          create: input,
+          create: {
+            ...createData,
+            sortOrder: nextOrder,
+          },
         });
 
-        return feed;
+        if (tagNames?.length) {
+          await this.setFeedTags(feed.id, tagNames);
+        }
+
+        const full = await this.prismaService.feed.findUnique({
+          where: { id: feed.id },
+          include: { tags: { include: { tag: true } } },
+        });
+        return this.mapFeedWithTags(full!);
       }),
     edit: this.trpcService.protectedProcedure
       .input(
@@ -222,16 +308,58 @@ export class TrpcRouter {
             syncTime: z.number().optional(),
             updateTime: z.number().optional(),
             status: z.number().optional(),
+            sortOrder: z.number().optional(),
+            /** 传入则全量替换标签 */
+            tags: z.array(z.string()).optional(),
           }),
         }),
       )
       .mutation(async ({ input }) => {
         const { id, data } = input;
+        const { tags: tagNames, ...rest } = data;
         const feed = await this.prismaService.feed.update({
           where: { id },
-          data,
+          data: rest,
         });
-        return feed;
+        if (tagNames) {
+          await this.setFeedTags(id, tagNames);
+        }
+        const full = await this.prismaService.feed.findUnique({
+          where: { id: feed.id },
+          include: { tags: { include: { tag: true } } },
+        });
+        return this.mapFeedWithTags(full!);
+      }),
+    /** 仅更新某公众号的标签 */
+    setTags: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          id: z.string(),
+          tags: z.array(z.string()),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        const tags = await this.setFeedTags(input.id, input.tags);
+        return { id: input.id, tags };
+      }),
+    /** 按传入 id 顺序批量更新 sortOrder */
+    reorder: this.trpcService.protectedProcedure
+      .input(
+        z.object({
+          orderedIds: z.array(z.string()).min(1),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        const { orderedIds } = input;
+        await this.prismaService.$transaction(
+          orderedIds.map((feedId, index) =>
+            this.prismaService.feed.update({
+              where: { id: feedId },
+              data: { sortOrder: index },
+            }),
+          ),
+        );
+        return { ok: true, count: orderedIds.length };
       }),
     delete: this.trpcService.protectedProcedure
       .input(z.string())
@@ -417,11 +545,65 @@ export class TrpcRouter {
       }),
   });
 
+  tagRouter = this.trpcService.router({
+    /** 列出全部标签；首次会写入对标 PDF 种子标签 */
+    list: this.trpcService.protectedProcedure.query(async () => {
+      const count = await this.prismaService.tag.count();
+      if (count === 0) {
+        for (let i = 0; i < SEED_TAGS.length; i++) {
+          await this.prismaService.tag.create({
+            data: { name: SEED_TAGS[i], sortOrder: i },
+          });
+        }
+      }
+      return this.prismaService.tag.findMany({
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      });
+    }),
+    /** 手动写入/补齐种子标签（可重复调用） */
+    seed: this.trpcService.protectedProcedure.mutation(async () => {
+      let created = 0;
+      for (let i = 0; i < SEED_TAGS.length; i++) {
+        const name = SEED_TAGS[i];
+        const before = await this.prismaService.tag.findUnique({
+          where: { name },
+        });
+        await this.prismaService.tag.upsert({
+          where: { name },
+          create: { name, sortOrder: i },
+          update: { sortOrder: i },
+        });
+        if (!before) created += 1;
+      }
+      const items = await this.prismaService.tag.findMany({
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+      });
+      return { created, total: items.length, items };
+    }),
+    create: this.trpcService.protectedProcedure
+      .input(z.object({ name: z.string().min(1).max(32) }))
+      .mutation(async ({ input }) => {
+        const name = input.name.trim();
+        return this.prismaService.tag.upsert({
+          where: { name },
+          create: { name },
+          update: {},
+        });
+      }),
+    delete: this.trpcService.protectedProcedure
+      .input(z.string())
+      .mutation(async ({ input: id }) => {
+        await this.prismaService.tag.delete({ where: { id } });
+        return id;
+      }),
+  });
+
   appRouter = this.trpcService.router({
     feed: this.feedRouter,
     account: this.accountRouter,
     article: this.articleRouter,
     platform: this.platformRouter,
+    tag: this.tagRouter,
   });
 
   async applyMiddleware(app: INestApplication) {
@@ -429,15 +611,8 @@ export class TrpcRouter {
       `/trpc`,
       trpcExpress.createExpressMiddleware({
         router: this.appRouter,
-        createContext: ({ req }) => {
-          const authCode =
-            this.configService.get<ConfigurationType['auth']>('auth')!.code;
-
-          if (authCode && req.headers.authorization !== authCode) {
-            return {
-              errorMsg: 'authCode不正确！',
-            };
-          }
+        createContext: () => {
+          // AuthCode 门禁已移除，接口直接放行
           return {
             errorMsg: null,
           };

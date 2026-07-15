@@ -81,9 +81,12 @@ const AccountPage = () => {
   }, [count, isOpen]);
 
   return (
-    <div>
-      <div className="flex justify-between m-4">
-        <div className="font-bold">共{data?.items.length || 0}个账号</div>
+    <div className="h-full bg-[var(--claude-canvas)] p-6">
+      <div className="max-w-5xl mx-auto">
+      <div className="flex justify-between items-center mb-4">
+        <div className="font-semibold tracking-tight text-[var(--claude-ink)]">
+          共{data?.items.length || 0}个账号
+        </div>
         <Button
           onPress={() => {
             onOpen();
@@ -91,12 +94,20 @@ const AccountPage = () => {
           }}
           size="sm"
           color="primary"
+          radius="lg"
+          className="font-medium"
           endContent={<PlusIcon />}
         >
           添加读书账号
         </Button>
       </div>
-      <Table aria-label="Example static collection table">
+      <Table
+        aria-label="账号列表"
+        classNames={{
+          wrapper:
+            'shadow-claude border border-[var(--claude-border)] bg-[var(--claude-paper)]',
+        }}
+      >
         <TableHeader>
           <TableColumn>ID</TableColumn>
           <TableColumn>用户名</TableColumn>
@@ -214,6 +225,7 @@ const AccountPage = () => {
           )}
         </ModalContent>
       </Modal>
+      </div>
     </div>
   );
 };

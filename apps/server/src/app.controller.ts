@@ -35,11 +35,8 @@ export class AppController {
   dashRender() {
     const { originUrl: weweRssServerOriginUrl } =
       this.configService.get<ConfigurationType['feed']>('feed')!;
-    const { code } = this.configService.get<ConfigurationType['auth']>('auth')!;
-
     return {
       weweRssServerOriginUrl,
-      enabledAuthCode: !!code,
       iconUrl: weweRssServerOriginUrl
         ? `${weweRssServerOriginUrl}/favicon.ico`
         : 'https://r2-assets.111965.xyz/wewe-rss.png',

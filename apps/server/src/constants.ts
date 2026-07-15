@@ -14,3 +14,25 @@ export const feedMimeTypeMap = {
 } as const;
 
 export const defaultCount = 20;
+
+/**
+ * 来自《精品对标号_标签_账号对应.pdf》的全部标签（仅标签名）
+ */
+export const SEED_TAGS: string[] = [
+  'AI',
+  '三农',
+  '个人成长',
+  '体制',
+  '体育健身',
+  '健康养生',
+  '其它',
+  '军事国际',
+  '动漫',
+  '历史',
+  '商业营销',
+  '壁纸头像',
+  '娱乐',
+  '宠物',
+  '家居',
+];
+

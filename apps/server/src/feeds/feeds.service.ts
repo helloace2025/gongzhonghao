@@ -100,10 +100,149 @@ export class FeedsService {
     }
   }
 
+  private isAllowedWechatMediaHost(hostname: string) {
+    const host = hostname.toLowerCase();
+    return (
+      host === 'mmbiz.qpic.cn' ||
+      host.endsWith('.qpic.cn') ||
+      host.endsWith('.qlogo.cn') ||
+      host.endsWith('.weixin.qq.com') ||
+      host.endsWith('.wechat.com')
+    );
+  }
+
+  /** 代理拉取微信图片，带上正确 Referer 绕过防盗链 */
+  async fetchProxiedImage(rawUrl: string): Promise<{
+    buffer: Buffer;
+    contentType: string;
+  }> {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      throw new HttpException('无效的图片地址', HttpStatus.BAD_REQUEST);
+    }
+
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new HttpException('不支持的协议', HttpStatus.BAD_REQUEST);
+    }
+
+    if (!this.isAllowedWechatMediaHost(parsed.hostname)) {
+      throw new HttpException('不允许的图片域名', HttpStatus.FORBIDDEN);
+    }
+
+    const response = await this.request(parsed.toString(), {
+      responseType: 'buffer',
+      headers: {
+        Referer: 'https://mp.weixin.qq.com/',
+        Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+      },
+    });
+
+    const contentType =
+      response.headers['content-type']?.toString() || 'image/jpeg';
+
+    return {
+      buffer: response.body as Buffer,
+      contentType,
+    };
+  }
+
+  /** 把正文里的微信图片改写到本地代理，解决阅读器防盗链 */
+  rewriteMediaForReader(html: string) {
+    const feedCfg =
+      this.configService.get<ConfigurationType['feed']>('feed')!;
+    const serverCfg =
+      this.configService.get<ConfigurationType['server']>('server')!;
+    // srcdoc iframe 内相对路径会失效，必须用绝对地址
+    const origin =
+      feedCfg.originUrl ||
+      `http://127.0.0.1:${serverCfg.port || 4000}`;
+
+    const $ = load(html, { decodeEntities: false });
+
+    const toProxy = (src?: string | null) => {
+      if (!src) return null;
+      const trimmed = src.trim();
+      if (
+        !trimmed ||
+        trimmed.startsWith('data:') ||
+        trimmed.startsWith('blob:') ||
+        trimmed.includes('/articles/proxy/image')
+      ) {
+        return null;
+      }
+      try {
+        const u = new URL(trimmed, 'https://mp.weixin.qq.com');
+        if (!this.isAllowedWechatMediaHost(u.hostname)) {
+          return null;
+        }
+        return `${origin.replace(/\/$/, '')}/articles/proxy/image?url=${encodeURIComponent(u.toString())}`;
+      } catch {
+        return null;
+      }
+    };
+
+    $('img').each((_, el) => {
+      const node = $(el);
+      const src = node.attr('src') || node.attr('data-src') || node.attr('data-original');
+      const proxied = toProxy(src);
+      if (proxied) {
+        node.attr('src', proxied);
+      }
+      node.removeAttr('data-src');
+      node.removeAttr('data-original');
+      node.attr('referrerpolicy', 'no-referrer');
+      node.attr('loading', 'lazy');
+      // 微信常把真实尺寸写在 data-ratio，清理可能的 0 宽高
+      const w = node.attr('width');
+      const h = node.attr('height');
+      if (w === '0') node.removeAttr('width');
+      if (h === '0') node.removeAttr('height');
+    });
+
+    // 处理 style 里的 background-image
+    $('[style*="url("]').each((_, el) => {
+      const node = $(el);
+      const style = node.attr('style') || '';
+      const next = style.replace(
+        /url\((['"]?)(https?:\/\/[^)'"]+)\1\)/gi,
+        (match, quote, url) => {
+          const proxied = toProxy(url);
+          return proxied ? `url(${quote || ''}${proxied}${quote || ''})` : match;
+        },
+      );
+      if (next !== style) {
+        node.attr('style', next);
+      }
+    });
+
+    // source / video poster
+    $('source').each((_, el) => {
+      const node = $(el);
+      const src = node.attr('src');
+      const proxied = toProxy(src);
+      if (proxied) node.attr('src', proxied);
+    });
+    $('video').each((_, el) => {
+      const node = $(el);
+      const poster = node.attr('poster');
+      const proxied = toProxy(poster);
+      if (proxied) node.attr('poster', proxied);
+    });
+
+    return $.html();
+  }
+
   async cleanHtml(source: string) {
     const $ = load(source, { decodeEntities: false });
 
-    const dirtyHtml = $.html($('.rich_media_content'));
+    const contentNode =
+      $('.rich_media_content').first().length > 0
+        ? $('.rich_media_content').first()
+        : $('#js_content').first();
+
+    const dirtyHtml = contentNode.length ? $.html(contentNode) : '';
 
     const html = dirtyHtml
       .replace(/data-src=/g, 'src=')
@@ -111,7 +250,7 @@ export class FeedsService {
       .replace(/visibility: hidden;/g, '');
 
     const content =
-      '<style> .rich_media_content {overflow: hidden;color: #222;font-size: 17px;word-wrap: break-word;-webkit-hyphens: auto;-ms-hyphens: auto;hyphens: auto;text-align: justify;position: relative;z-index: 0;}.rich_media_content {font-size: 18px;}</style>' +
+      '<style> .rich_media_content,#js_content {overflow: hidden;color: #222;font-size: 17px;word-wrap: break-word;-webkit-hyphens: auto;-ms-hyphens: auto;hyphens: auto;text-align: justify;position: relative;z-index: 0;}.rich_media_content,#js_content {font-size: 18px;} img{max-width:100%;height:auto;display:block;margin:12px auto;} </style>' +
       html;
 
     const result = minify(content, {
@@ -120,6 +259,294 @@ export class FeedsService {
     });
 
     return result;
+  }
+
+  /**
+   * 阅读器专用清洗：保留代码块空白，还原微信特殊组件（代码块/链接卡片等）
+   * 注意：不能对 pre/code 做 collapseWhitespace，否则代码库内容会丢
+   */
+  prepareReaderHtml(source: string): string {
+    const $ = load(source, {
+      decodeEntities: false,
+      // 保留正文结构，便于处理微信自定义标签
+      xmlMode: false,
+    });
+
+    // 去掉脚本，避免污染正文
+    $('script').remove();
+
+    const contentNode =
+      $('.rich_media_content').first().length > 0
+        ? $('.rich_media_content').first()
+        : $('#js_content').first();
+
+    if (!contentNode.length) {
+      return '';
+    }
+
+    // lazy 资源
+    contentNode.find('[data-src]').each((_, el) => {
+      const node = $(el);
+      if (!node.attr('src')) {
+        node.attr('src', node.attr('data-src') || '');
+      }
+    });
+
+    // 取消微信隐藏样式（会影响代码块显示）
+    contentNode.find('[style]').each((_, el) => {
+      const node = $(el);
+      const style = node.attr('style') || '';
+      const cls =
+        `${node.attr('class') || ''} ${node.parent().attr('class') || ''}`;
+      const isCodeLike = /code|pre|snippet|highlight|prettyprint/i.test(cls);
+      const hasText = (node.text() || '').trim().length > 0;
+      let next = style
+        .replace(/opacity\s*:\s*0\s*(!important)?;?/gi, '')
+        .replace(/visibility\s*:\s*hidden\s*;?/gi, '');
+      if (isCodeLike || hasText) {
+        next = next.replace(/display\s*:\s*none\s*;?/gi, isCodeLike ? 'display:block;' : '');
+      }
+      if (next !== style) node.attr('style', next);
+    });
+
+    // --- 微信代码块 / 代码库 ---
+    // 1) 标准 pre/code
+    contentNode.find('pre').each((_, el) => {
+      const node = $(el);
+      node.addClass('wewe-code-block');
+      // 去掉行号列表干扰（若有并列 ul）
+      node.find('.code-snippet__line-index').remove();
+      let text = node.text();
+      // 若 pre 被压成一行空内容，尝试从 code 子节点拼
+      if (!text.trim()) {
+        const chunks: string[] = [];
+        node.find('code, .code-snippet_line, li, span[leaf]').each((__, line) => {
+          const t = $(line).text();
+          if (t != null) chunks.push(t);
+        });
+        text = chunks.join('\n');
+      }
+      if (text.trim()) {
+        // 规范化为干净 pre>code，避免微信复杂 DOM 在 iframe 里丢样式/丢字
+        const code = $('<code class="wewe-code"></code>');
+        code.text(text.replace(/\u00a0/g, ' '));
+        const pre = $('<pre class="wewe-code-block"></pre>');
+        pre.append(code);
+        node.replaceWith(pre);
+      }
+    });
+
+    // 2) code-snippet 容器（无 pre 时）
+    contentNode
+      .find(
+        '.code-snippet, .code-snippet__fix, section.code-snippet__fix, [class*="code-snippet"]',
+      )
+      .each((_, el) => {
+        const node = $(el);
+        if (node.closest('pre.wewe-code-block').length) return;
+        if (node.find('pre.wewe-code-block').length) return;
+
+        const lines: string[] = [];
+        const lineNodes = node.find(
+          '.code-snippet_line, .code-snippet__line, li, code span, span[leaf]',
+        );
+        if (lineNodes.length) {
+          lineNodes.each((__, line) => {
+            lines.push($(line).text());
+          });
+        } else {
+          lines.push(node.text());
+        }
+        const text = lines.join('\n').replace(/\u00a0/g, ' ').trim();
+        if (!text) return;
+
+        const code = $('<code class="wewe-code"></code>');
+        code.text(text);
+        const pre = $('<pre class="wewe-code-block"></pre>');
+        pre.append(code);
+        node.replaceWith(pre);
+      });
+
+    // 3) 仅有 code 标签、外包一层
+    contentNode.find('code').each((_, el) => {
+      const node = $(el);
+      if (node.closest('pre').length) return;
+      const text = node.text().replace(/\u00a0/g, ' ');
+      // 多行才当代码块，单行行内 code 保留
+      if (!text.includes('\n') && text.length < 80) {
+        node.addClass('wewe-inline-code');
+        return;
+      }
+      const code = $('<code class="wewe-code"></code>');
+      code.text(text);
+      const pre = $('<pre class="wewe-code-block"></pre>');
+      pre.append(code);
+      node.replaceWith(pre);
+    });
+
+    // --- 链接卡片 / 仓库引用（常被 JS 渲染，静态页只剩空壳或 a）---
+    const promoteLinkCard = (
+      href: string,
+      title: string,
+      desc?: string,
+    ) => {
+      const safeHref = href.trim();
+      if (!safeHref) return null;
+      const card = $(
+        '<div class="wewe-link-card"><a class="wewe-link-card__anchor" target="_blank" rel="noopener noreferrer"></a></div>',
+      );
+      const a = card.find('a');
+      a.attr('href', safeHref);
+      const titleEl = $('<div class="wewe-link-card__title"></div>').text(
+        title || safeHref,
+      );
+      a.append(titleEl);
+      if (desc) {
+        a.append($('<div class="wewe-link-card__desc"></div>').text(desc));
+      }
+      a.append(
+        $('<div class="wewe-link-card__url"></div>').text(safeHref),
+      );
+      return card;
+    };
+
+    // github / gitee / gitlab 链接提出来做卡片
+    contentNode.find('a[href]').each((_, el) => {
+      const node = $(el);
+      const href = node.attr('href') || '';
+      if (
+        !/github\.com|gitee\.com|gitlab\.com|gitcode\.net|bitbucket\.org/i.test(
+          href,
+        )
+      ) {
+        return;
+      }
+      // 已在卡片内跳过
+      if (node.closest('.wewe-link-card').length) return;
+      const title =
+        node.attr('data-title') ||
+        node.attr('title') ||
+        node.text().trim() ||
+        href;
+      const card = promoteLinkCard(href, title);
+      if (card) {
+        // 若父级几乎只有这一个链接，替换父级，避免重复
+        const parent = node.parent();
+        if (parent.length && parent.text().trim() === node.text().trim()) {
+          parent.replaceWith(card);
+        } else {
+          node.replaceWith(card);
+        }
+      }
+    });
+
+    // 处理带 data-url / data-link 的卡片壳
+    contentNode.find('[data-url], [data-link], [data-srcurl]').each((_, el) => {
+      const node = $(el);
+      if (node.closest('.wewe-link-card, pre, a').length) return;
+      const href =
+        node.attr('data-url') ||
+        node.attr('data-link') ||
+        node.attr('data-srcurl') ||
+        '';
+      if (!/^https?:\/\//i.test(href)) return;
+      if (
+        !/github\.com|gitee\.com|gitlab\.com|gitcode|mp\.weixin\.qq\.com/i.test(
+          href,
+        ) &&
+        !node.is('section, div')
+      ) {
+        return;
+      }
+      const title =
+        node.attr('data-title') ||
+        node.find('.js_title, .title, strong').first().text().trim() ||
+        node.text().replace(/\s+/g, ' ').trim().slice(0, 80) ||
+        href;
+      const card = promoteLinkCard(href, title);
+      if (card && !(node.text() || '').trim().length) {
+        node.replaceWith(card);
+      } else if (card && /github\.com|gitee\.com|gitlab\.com/i.test(href)) {
+        node.replaceWith(card);
+      }
+    });
+
+    // blockquote 标记
+    contentNode.find('blockquote').addClass('wewe-quote');
+
+    // 去掉宽高写死的属性，交给阅读器 CSS 统一控制图片尺寸
+    contentNode.find('img').each((_, el) => {
+      const node = $(el);
+      const src = (node.attr('src') || '').trim();
+      // 无有效 src 的空图占位（易形成白长条）
+      if (
+        !src ||
+        src === '#' ||
+        src.startsWith('data:image/svg') ||
+        /placeholder|blank|transparent/i.test(src)
+      ) {
+        node.remove();
+        return;
+      }
+      node.removeAttr('width');
+      node.removeAttr('height');
+      node.removeAttr('data-w');
+      node.addClass('wewe-img');
+    });
+
+    // 去掉空链接卡片 / 空壳区块（纯文字文末常见无用白条）
+    contentNode
+      .find(
+        '.wewe-link-card, section, div, p, span, mpprofile, mp-common-profile, iframe',
+      )
+      .each((_, el) => {
+        const node = $(el);
+        if (node.closest('pre, .wewe-code-block').length) return;
+        const text = (node.text() || '').replace(/\u200b|\s/g, '');
+        const hasMedia =
+          node.find('img, video, iframe, pre, table').length > 0 ||
+          node.is('img, video, iframe, pre, table');
+        if (!text && !hasMedia) {
+          node.remove();
+        }
+      });
+
+    // 多轮清理嵌套空壳
+    for (let i = 0; i < 3; i++) {
+      contentNode.find('section, div, p').each((_, el) => {
+        const node = $(el);
+        if (node.closest('pre').length) return;
+        const text = (node.text() || '').replace(/\u200b|\s/g, '');
+        const hasMedia = node.find('img, video, iframe, pre, table').length > 0;
+        if (!text && !hasMedia) node.remove();
+      });
+    }
+
+    // 去掉行内强制加粗/字重样式，交给阅读器统一正文字重
+    contentNode.find('[style]').each((_, el) => {
+      const node = $(el);
+      let style = node.attr('style') || '';
+      const next = style
+        .replace(/font-weight\s*:\s*[^;]+;?/gi, '')
+        .replace(/font-family\s*:\s*[^;]+;?/gi, '');
+      if (next !== style) {
+        if (next.replace(/\s|;/g, '')) node.attr('style', next);
+        else node.removeAttr('style');
+      }
+    });
+    // strong/b 降为普通语义，避免全文“假加粗”
+    contentNode.find('strong, b').each((_, el) => {
+      const node = $(el);
+      node.replaceWith(`<span>${node.html() || node.text()}</span>`);
+    });
+
+    // 输出：仅正文内部 HTML，样式由前端 iframe 注入
+    let html = contentNode.html() || '';
+    html = html
+      .replace(/data-src=/g, 'src=')
+      .replace(/\u200b/g, '');
+
+    return html;
   }
 
   async getHtmlByUrl(url: string) {
@@ -147,6 +574,38 @@ export class FeedsService {
     });
     mpCache.set(id, content);
     return content;
+  }
+
+  /** 阅读器专用：始终清洗正文 HTML，并改写图片到本地代理 */
+  async getReaderContent(id: string) {
+    // v4：纯文字排版：去空壳长条、取消默认加粗
+    const cacheKey = `reader:v4:${id}`;
+    const cached = mpCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const url = `https://mp.weixin.qq.com/s/${id}`;
+    try {
+      const rawHtml = await this.request(url, { responseType: 'text' }).text();
+      let cleaned = this.prepareReaderHtml(rawHtml);
+      if (!cleaned || cleaned.replace(/<[^>]+>/g, '').trim().length < 20) {
+        // 回退到旧清洗逻辑
+        cleaned = await this.cleanHtml(rawHtml);
+      }
+      if (!cleaned || cleaned.replace(/<[^>]+>/g, '').trim().length < 20) {
+        const fallback =
+          '<p class="wewe-empty">正文解析失败，请点击右上角在微信原文中查看。</p>';
+        mpCache.set(cacheKey, fallback);
+        return fallback;
+      }
+      cleaned = this.rewriteMediaForReader(cleaned);
+      mpCache.set(cacheKey, cleaned);
+      return cleaned;
+    } catch (e: any) {
+      this.logger.error(`getReaderContent(${url}) error: ${e.message}`);
+      return '<p class="wewe-empty">获取全文失败，请稍后重试或打开原文。</p>';
+    }
   }
 
   async renderFeed({
@@ -283,6 +742,7 @@ export class FeedsService {
         syncTime: 0,
         updateTime: Math.floor(Date.now() / 1e3),
         hasHistory: -1,
+        sortOrder: 0,
         createdAt: new Date(),
         updatedAt: new Date(),
       };

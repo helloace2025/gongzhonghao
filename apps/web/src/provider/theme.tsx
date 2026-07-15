@@ -7,7 +7,11 @@ function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <NextUIProvider navigate={navigate}>
-      <NextThemesProvider attribute="class" enableSystem>
+      <NextThemesProvider
+        attribute="class"
+        defaultTheme="light"
+        enableSystem
+      >
         {children}
       </NextThemesProvider>
     </NextUIProvider>

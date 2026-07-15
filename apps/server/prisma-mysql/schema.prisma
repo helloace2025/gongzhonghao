@@ -1,5 +1,5 @@
 datasource db {
-  provider = "sqlite"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
@@ -10,11 +10,11 @@ generator client {
 
 // 读书账号
 model Account {
-  id        String    @id
-  token     String    @map("token")
-  name      String    @map("name")
+  id        String    @id @db.VarChar(255)
+  token     String    @map("token") @db.VarChar(2048)
+  name      String    @map("name") @db.VarChar(1024)
   // 状态 0:失效 1:启用 2:禁用
-  status    Int       @default(1) @map("status")
+  status    Int       @default(1) @map("status") @db.Int()
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @default(now()) @updatedAt @map("updated_at")
 
@@ -23,12 +23,12 @@ model Account {
 
 // 订阅源
 model Feed {
-  id      String @id
-  mpName  String @map("mp_name")
-  mpCover String @map("mp_cover")
-  mpIntro String @map("mp_intro")
+  id      String @id @db.VarChar(255)
+  mpName  String @map("mp_name") @db.VarChar(512)
+  mpCover String @map("mp_cover") @db.VarChar(1024)
+  mpIntro String @map("mp_intro") @db.Text()
   // 状态 0:失效 1:启用 2:禁用
-  status  Int    @default(1) @map("status")
+  status  Int    @default(1) @map("status") @db.Int()
 
   // article最后同步时间
   syncTime Int @default(0) @map("sync_time")
@@ -43,18 +43,17 @@ model Feed {
   hasHistory Int? @default(1) @map("has_history")
 
   // 侧边栏展示顺序，越小越靠前
-  sortOrder Int @default(0) @map("sort_order")
+  sortOrder Int @default(0) @map("sort_order") @db.Int()
 
   tags FeedTag[]
 
   @@map("feeds")
 }
 
-// 标签（如 AI、商业营销）
 model Tag {
-  id        String    @id @default(cuid())
-  name      String    @unique @map("name")
-  sortOrder Int       @default(0) @map("sort_order")
+  id        String    @id @default(cuid()) @db.VarChar(64)
+  name      String    @unique @map("name") @db.VarChar(64)
+  sortOrder Int       @default(0) @map("sort_order") @db.Int()
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime? @default(now()) @updatedAt @map("updated_at")
 
@@ -63,10 +62,9 @@ model Tag {
   @@map("tags")
 }
 
-// 公众号 ↔ 标签 多对多
 model FeedTag {
-  feedId String @map("feed_id")
-  tagId  String @map("tag_id")
+  feedId String @map("feed_id") @db.VarChar(255)
+  tagId  String @map("tag_id") @db.VarChar(64)
 
   feed Feed @relation(fields: [feedId], references: [id], onDelete: Cascade)
   tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
@@ -76,10 +74,10 @@ model FeedTag {
 }
 
 model Article {
-  id          String @id
-  mpId        String @map("mp_id")
-  title       String @map("title")
-  picUrl      String @map("pic_url")
+  id          String @id @db.VarChar(255)
+  mpId        String @map("mp_id") @db.VarChar(255)
+  title       String @map("title") @db.VarChar(255)
+  picUrl      String @map("pic_url") @db.VarChar(255)
   publishTime Int    @map("publish_time")
 
   createdAt DateTime  @default(now()) @map("created_at")

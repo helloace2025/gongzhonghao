@@ -63,7 +63,7 @@ export function ThemeSwitcher(props) {
             class: [
               'w-8 h-8',
               'flex items-center justify-center',
-              'rounded-lg bg-default-100 hover:bg-default-200',
+              'rounded-lg bg-[var(--claude-hover)] text-[var(--claude-muted)] hover:text-[var(--claude-ink)]',
             ],
           })}
         >

@@ -1,10 +1,8 @@
 import {
   Avatar,
   Button,
+  Chip,
   Divider,
-  Listbox,
-  ListboxItem,
-  ListboxSection,
   Modal,
   ModalBody,
   ModalContent,
@@ -18,19 +16,64 @@ import {
 } from '@nextui-org/react';
 import { PlusIcon } from '@web/components/PlusIcon';
 import { trpc } from '@web/utils/trpc';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type DragEvent } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import dayjs from 'dayjs';
-import { serverOriginUrl } from '@web/utils/env';
-import ArticleList from './list';
+import ArticleList, { ArticleListItem } from './list';
+import ArticleReader from './reader';
+
+type FeedTag = { id: string; name: string };
+
+type FeedItem = {
+  id: string;
+  mpName: string;
+  mpCover: string;
+  mpIntro: string;
+  status: number;
+  syncTime: number;
+  updateTime: number;
+  hasHistory?: number | null;
+  sortOrder?: number;
+  tags?: FeedTag[];
+};
 
 const Feeds = () => {
   const { id } = useParams();
 
   const { isOpen, onOpen, onOpenChange, onClose } = useDisclosure();
+  const {
+    isOpen: isTagModalOpen,
+    onOpen: onTagModalOpen,
+    onOpenChange: onTagModalOpenChange,
+    onClose: onTagModalClose,
+  } = useDisclosure();
+
+  /** 当前筛选标签；null = 全部 */
+  const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  /** 导入公众号时勾选的标签 */
+  const [importTags, setImportTags] = useState<string[]>([]);
+  /** 编辑已有公众号标签 */
+  const [editingFeed, setEditingFeed] = useState<FeedItem | null>(null);
+  const [editingTags, setEditingTags] = useState<string[]>([]);
+
+  const { data: tagList, refetch: refetchTags } = trpc.tag.list.useQuery(
+    undefined,
+    { refetchOnWindowFocus: true },
+  );
+  const { mutateAsync: seedTags } = trpc.tag.seed.useMutation({});
+  const { mutateAsync: createTag } = trpc.tag.create.useMutation({});
+  const { mutateAsync: deleteTag, isLoading: isDeleteTagLoading } =
+    trpc.tag.delete.useMutation({});
+  const { mutateAsync: setFeedTags } = trpc.feed.setTags.useMutation({});
+  const [newTagName, setNewTagName] = useState('');
+  /** 编辑标签模式：可新增 / 删除；默认关闭，只做筛选 */
+  const [tagEditMode, setTagEditMode] = useState(false);
+
   const { refetch: refetchFeedList, data: feedData } = trpc.feed.list.useQuery(
-    {},
+    {
+      tag: selectedTag || undefined,
+    },
     {
       refetchOnWindowFocus: true,
     },
@@ -66,14 +109,53 @@ const Feeds = () => {
 
   const { mutateAsync: deleteFeed, isLoading: isDeleteFeedLoading } =
     trpc.feed.delete.useMutation({});
+  const { mutateAsync: reorderFeeds } = trpc.feed.reorder.useMutation({});
 
   const [wxsLink, setWxsLink] = useState('');
 
   const [currentMpId, setCurrentMpId] = useState(id || '');
+  const [selectedArticle, setSelectedArticle] =
+    useState<ArticleListItem | null>(null);
+  /** 侧边栏本地顺序（拖拽时即时反馈） */
+  const [localFeeds, setLocalFeeds] = useState<FeedItem[]>([]);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  // 首次进入时确保对标 PDF 标签已写入
+  useEffect(() => {
+    seedTags()
+      .then(() => refetchTags())
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 切换订阅源时清空阅读器选中
+  useEffect(() => {
+    setCurrentMpId(id || '');
+    setSelectedArticle(null);
+  }, [id]);
+
+  // 同步服务端列表到本地（非拖拽中）
+  useEffect(() => {
+    if (feedData?.items && !draggingId) {
+      setLocalFeeds(feedData.items as FeedItem[]);
+    }
+  }, [feedData?.items, draggingId]);
+
+  const toggleNameInList = (
+    list: string[],
+    name: string,
+    setList: (v: string[]) => void,
+  ) => {
+    if (list.includes(name)) {
+      setList(list.filter((t) => t !== name));
+    } else {
+      setList([...list, name]);
+    }
+  };
 
   const handleConfirm = async () => {
     console.log('wxsLink', wxsLink);
-    // TODO show operation in progress
     const wxsLinks = wxsLink.split('\n').filter((link) => link.trim() !== '');
     for (const link of wxsLinks) {
       console.log('add wxsLink', link);
@@ -87,10 +169,13 @@ const Feeds = () => {
           mpIntro: item.intro,
           updateTime: item.updateTime,
           status: 1,
+          tags: importTags,
         });
         await refreshMpArticles({ mpId: item.id });
         toast.success('添加成功', {
-          description: `公众号 ${item.name}`,
+          description: `公众号 ${item.name}${
+            importTags.length ? ` · ${importTags.join('、')}` : ''
+          }`,
         });
         await queryUtils.article.list.reset();
       } else {
@@ -99,7 +184,71 @@ const Feeds = () => {
     }
     refetchFeedList();
     setWxsLink('');
+    setImportTags([]);
     onClose();
+  };
+
+  const openEditTags = (feed: FeedItem) => {
+    setEditingFeed(feed);
+    setEditingTags((feed.tags || []).map((t) => t.name));
+    onTagModalOpen();
+  };
+
+  const handleSaveFeedTags = async () => {
+    if (!editingFeed) return;
+    try {
+      await setFeedTags({ id: editingFeed.id, tags: editingTags });
+      toast.success('标签已更新', { description: editingFeed.mpName });
+      await refetchFeedList();
+      onTagModalClose();
+      setEditingFeed(null);
+    } catch (e: any) {
+      toast.error('保存失败', { description: e?.message || '请重试' });
+    }
+  };
+
+  const handleCreateTag = async () => {
+    const name = newTagName.trim();
+    if (!name) {
+      toast.error('请输入标签名');
+      return;
+    }
+    try {
+      await createTag({ name });
+      toast.success('标签已添加', { description: name });
+      setNewTagName('');
+      await refetchTags();
+    } catch (e: any) {
+      toast.error('添加失败', { description: e?.message || '请重试' });
+    }
+  };
+
+  const exitTagEditMode = () => {
+    setTagEditMode(false);
+    setNewTagName('');
+  };
+
+  const handleDeleteTag = async (tagId: string, tagName: string) => {
+    if (
+      !window.confirm(
+        `确定删除标签「${tagName}」吗？\n不会删除公众号，只去掉该标签关联。`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await deleteTag(tagId);
+      if (selectedTag === tagName) {
+        setSelectedTag(null);
+      }
+      setImportTags((prev) => prev.filter((t) => t !== tagName));
+      setEditingTags((prev) => prev.filter((t) => t !== tagName));
+      toast.success('标签已删除', { description: tagName });
+      await refetchTags();
+      await refetchFeedList();
+    } catch (e: any) {
+      toast.error('删除失败', { description: e?.message || '请重试' });
+    }
   };
 
   const isActive = (key: string) => {
@@ -107,8 +256,90 @@ const Feeds = () => {
   };
 
   const currentMpInfo = useMemo(() => {
-    return feedData?.items.find((item) => item.id === currentMpId);
-  }, [currentMpId, feedData?.items]);
+    return localFeeds.find((item) => item.id === currentMpId);
+  }, [currentMpId, localFeeds]);
+
+  const handleDeleteFeed = async (feedId: string, feedName: string) => {
+    if (
+      !window.confirm(
+        `确定删除订阅源「${feedName}」吗？\n仅删除订阅，已获取的文章不会被删除。`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await deleteFeed(feedId);
+      toast.success('已删除订阅源', { description: feedName });
+      if (currentMpId === feedId) {
+        navigate('/feeds');
+        setCurrentMpId('');
+      }
+      await refetchFeedList();
+    } catch (e: any) {
+      toast.error('删除失败', { description: e?.message || '请重试' });
+    }
+  };
+
+  const handleDragStart = (feedId: string) => (ev: DragEvent) => {
+    setDraggingId(feedId);
+    ev.dataTransfer.effectAllowed = 'move';
+    ev.dataTransfer.setData('text/plain', feedId);
+  };
+
+  const handleDragOver = (feedId: string) => (ev: DragEvent) => {
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'move';
+    if (dragOverId !== feedId) setDragOverId(feedId);
+  };
+
+  const handleDrop = (targetId: string) => async (ev: DragEvent) => {
+    ev.preventDefault();
+    const sourceId = ev.dataTransfer.getData('text/plain') || draggingId;
+    setDragOverId(null);
+    setDraggingId(null);
+    if (!sourceId || sourceId === targetId) return;
+
+    const from = localFeeds.findIndex((f) => f.id === sourceId);
+    const to = localFeeds.findIndex((f) => f.id === targetId);
+    if (from < 0 || to < 0) return;
+
+    const next = [...localFeeds];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setLocalFeeds(next);
+
+    try {
+      await reorderFeeds({ orderedIds: next.map((f) => f.id) });
+      await refetchFeedList();
+    } catch (e: any) {
+      toast.error('排序保存失败', { description: e?.message || '请重试' });
+      await refetchFeedList();
+    }
+  };
+
+  const handleDragEnd = () => {
+    setDraggingId(null);
+    setDragOverId(null);
+  };
+
+  const selectFeed = (feedId: string) => {
+    setCurrentMpId(feedId);
+    if (feedId) {
+      navigate(`/feeds/${feedId}`);
+    } else {
+      navigate('/feeds');
+    }
+  };
+
+  // 无「全部」入口：未选中或已删源时默认选中第一个
+  useEffect(() => {
+    if (!localFeeds.length) return;
+    if (!currentMpId || !localFeeds.some((f) => f.id === currentMpId)) {
+      const firstId = localFeeds[0].id;
+      setCurrentMpId(firstId);
+      navigate(`/feeds/${firstId}`);
+    }
+  }, [localFeeds, currentMpId, navigate]);
 
   const handleExportOpml = async (ev) => {
     ev.preventDefault();
@@ -144,74 +375,258 @@ const Feeds = () => {
 
   return (
     <>
-      <div className="h-full flex justify-between">
-        <div className="w-64 p-4 h-full">
-          <div className="pb-4 flex justify-between align-middle items-center">
+      <div className="h-full flex min-h-0 bg-[var(--claude-canvas)]">
+        {/* 左：订阅源栏 */}
+        <div className="w-60 shrink-0 border-r border-[var(--claude-border)] p-3 h-full flex flex-col min-h-0 claude-sidebar">
+          <div className="pb-3 flex flex-col items-center gap-1.5 shrink-0">
             <Button
-              color="primary"
               size="sm"
+              radius="lg"
+              className="font-medium shadow-none w-full max-w-[140px] bg-[#07c160] text-white data-[hover=true]:bg-[#06ad56]"
               onPress={onOpen}
               endContent={<PlusIcon />}
             >
               添加
             </Button>
-            <div className="font-normal text-sm">
+            <div className="font-normal text-[11px] text-[var(--claude-muted)]">
               共{feedData?.items.length || 0}个订阅
             </div>
           </div>
 
-          {feedData?.items ? (
-            <Listbox
-              aria-label="订阅源"
-              emptyContent="暂无订阅"
-              onAction={(key) => setCurrentMpId(key as string)}
-            >
-              <ListboxSection showDivider>
-                <ListboxItem
-                  key={''}
-                  href={`/feeds`}
-                  className={isActive('') ? 'bg-primary-50 text-primary' : ''}
-                  startContent={<Avatar name="ALL"></Avatar>}
+          <div className="h-px bg-[var(--claude-border)] mx-1 mb-2 shrink-0" />
+
+          {/* 标签：默认筛选；点「编辑标签」后可增删 */}
+          <div className="shrink-0 mb-2">
+            <div className="flex items-center justify-between mb-1.5 px-0.5">
+              <span className="text-[10px] text-[var(--claude-muted)]">
+                {tagEditMode ? '编辑标签' : '标签筛选'}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (tagEditMode) {
+                    exitTagEditMode();
+                  } else {
+                    setTagEditMode(true);
+                  }
+                }}
+                className={`text-[10px] hover:underline ${
+                  tagEditMode
+                    ? 'text-[var(--claude-muted)]'
+                    : 'text-[#07c160]'
+                }`}
+              >
+                {tagEditMode ? '完成' : '编辑标签'}
+              </button>
+            </div>
+
+            {tagEditMode ? (
+              <div className="flex gap-1 mb-1.5">
+                <input
+                  value={newTagName}
+                  onChange={(e) => setNewTagName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleCreateTag();
+                    }
+                  }}
+                  placeholder="输入新标签名"
+                  className="flex-1 min-w-0 text-[11px] px-2 py-1 rounded-lg border border-[var(--claude-border)] bg-[var(--claude-paper)] outline-none focus:border-[#07c160]"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={handleCreateTag}
+                  className="shrink-0 text-[11px] px-2 py-1 rounded-lg bg-[#07c160] text-white"
+                >
+                  添加
+                </button>
+              </div>
+            ) : null}
+
+            <div className="flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto content-start">
+              {/* 「全部」仅筛选模式显示，不可删 */}
+              {!tagEditMode ? (
+                <button
+                  type="button"
+                  onClick={() => setSelectedTag(null)}
+                  className={`text-[11px] px-2 py-0.5 rounded-full border transition-colors ${
+                    selectedTag === null
+                      ? 'bg-[#07c160] text-white border-[#07c160]'
+                      : 'border-[var(--claude-border)] text-[var(--claude-muted)] hover:bg-[var(--claude-hover)]'
+                  }`}
                 >
                   全部
-                </ListboxItem>
-              </ListboxSection>
+                </button>
+              ) : null}
 
-              <ListboxSection className="overflow-y-auto h-[calc(100vh-260px)]">
-                {feedData?.items.map((item) => {
-                  return (
-                    <ListboxItem
-                      href={`/feeds/${item.id}`}
-                      className={
-                        isActive(item.id) ? 'bg-primary-50 text-primary' : ''
-                      }
-                      key={item.id}
-                      startContent={<Avatar src={item.mpCover}></Avatar>}
+              {(tagList || []).map((tag) => {
+                const active = selectedTag === tag.name;
+                return (
+                  <span
+                    key={tag.id}
+                    className={`relative inline-flex items-center text-[11px] rounded-full border transition-colors select-none ${
+                      tagEditMode ? 'pl-2 pr-4 py-0.5' : 'px-2 py-0.5'
+                    } ${
+                      active && !tagEditMode
+                        ? 'bg-[var(--claude-accent)] text-white border-[var(--claude-accent)]'
+                        : 'border-[var(--claude-border)] text-[var(--claude-ink)] hover:bg-[var(--claude-accent-soft)]'
+                    } ${tagEditMode ? 'cursor-default' : 'cursor-pointer'}`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (tagEditMode) return;
+                        setSelectedTag(active ? null : tag.name);
+                      }}
+                      className="max-w-[5.5rem] truncate"
+                      title={tag.name}
                     >
-                      {item.mpName}
-                    </ListboxItem>
+                      {tag.name}
+                    </button>
+                    {tagEditMode ? (
+                      <button
+                        type="button"
+                        disabled={isDeleteTagLoading}
+                        onClick={(ev) => {
+                          ev.preventDefault();
+                          ev.stopPropagation();
+                          handleDeleteTag(tag.id, tag.name);
+                        }}
+                        className="absolute -top-1.5 -right-1.5 w-3.5 h-3.5 rounded-full flex items-center justify-center text-[9px] leading-none border shadow-sm bg-[var(--claude-paper)] text-[var(--claude-muted)] border-[var(--claude-border)] hover:text-danger hover:border-danger"
+                        title={`删除标签 ${tag.name}`}
+                        aria-label={`删除标签 ${tag.name}`}
+                      >
+                        ×
+                      </button>
+                    ) : null}
+                  </span>
+                );
+              })}
+            </div>
+            {tagEditMode ? (
+              <div className="mt-1 text-[10px] text-[var(--claude-muted)] px-0.5">
+                点标签右上角 × 删除；上方可添加新标签
+              </div>
+            ) : null}
+          </div>
+
+          <div className="h-px bg-[var(--claude-border)] mx-1 mb-2 shrink-0" />
+
+          <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+            <div className="flex-1 overflow-y-auto min-h-0 space-y-0.5 pr-0.5">
+              {!localFeeds.length ? (
+                <div className="text-xs text-[var(--claude-muted)] text-center py-6 px-2">
+                  {selectedTag
+                    ? `暂无「${selectedTag}」标签的公众号`
+                    : '暂无订阅'}
+                </div>
+              ) : (
+                localFeeds.map((item) => {
+                  const active = isActive(item.id);
+                  const isDragging = draggingId === item.id;
+                  const isOver =
+                    dragOverId === item.id && draggingId !== item.id;
+                  return (
+                    <div
+                      key={item.id}
+                      draggable
+                      onDragStart={handleDragStart(item.id)}
+                      onDragOver={handleDragOver(item.id)}
+                      onDrop={handleDrop(item.id)}
+                      onDragEnd={handleDragEnd}
+                      className={`group flex items-center gap-1 rounded-xl px-1 py-1.5 cursor-grab active:cursor-grabbing border border-transparent transition-colors ${
+                        active
+                          ? 'claude-item-active font-medium'
+                          : 'text-[var(--claude-ink)] claude-item-hover'
+                      } ${isDragging ? 'opacity-50' : ''} ${
+                        isOver
+                          ? 'border-[var(--claude-accent)] border-dashed bg-[var(--claude-accent-soft)]'
+                          : ''
+                      }`}
+                    >
+                      <span
+                        className="text-[var(--claude-muted)] text-xs px-0.5 select-none shrink-0 opacity-50"
+                        title="拖动排序"
+                        aria-hidden
+                      >
+                        ⋮⋮
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => selectFeed(item.id)}
+                        className="flex-1 min-w-0 flex items-center gap-2 text-left text-sm"
+                      >
+                        <Avatar
+                          src={item.mpCover}
+                          size="sm"
+                          className="shrink-0 ring-1 ring-[var(--claude-border)]"
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="truncate block">{item.mpName}</span>
+                          {item.tags && item.tags.length > 0 ? (
+                            <span className="truncate block text-[10px] font-normal text-[var(--claude-muted)]">
+                              {item.tags.map((t) => t.name).join(' · ')}
+                            </span>
+                          ) : null}
+                        </span>
+                      </button>
+                      <Tooltip content="编辑标签">
+                        <button
+                          type="button"
+                          onClick={(ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            openEditTags(item);
+                          }}
+                          className="shrink-0 w-6 h-6 rounded-lg text-[var(--claude-muted)] hover:text-[var(--claude-accent)] hover:bg-[var(--claude-accent-soft)] text-[11px] leading-none opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="标签"
+                          aria-label={`编辑 ${item.mpName} 标签`}
+                        >
+                          标
+                        </button>
+                      </Tooltip>
+                      <Tooltip content="删除此订阅源">
+                        <button
+                          type="button"
+                          disabled={isDeleteFeedLoading}
+                          onClick={(ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            handleDeleteFeed(item.id, item.mpName);
+                          }}
+                          className="shrink-0 w-6 h-6 rounded-lg text-[var(--claude-muted)] hover:text-danger hover:bg-danger-50 text-sm leading-none opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="删除"
+                          aria-label={`删除 ${item.mpName}`}
+                        >
+                          ×
+                        </button>
+                      </Tooltip>
+                    </div>
                   );
-                }) || []}
-              </ListboxSection>
-            </Listbox>
-          ) : (
-            ''
-          )}
+                })
+              )}
+            </div>
+            <div className="pt-2 text-[10px] text-[var(--claude-muted)] text-center shrink-0">
+              拖动 ⋮⋮ 可调整顺序
+            </div>
+          </div>
         </div>
-        <div className="flex-1 h-full flex flex-col">
-          <div className="p-4 pb-0 flex justify-between">
-            <h3 className="text-medium font-mono flex-1 overflow-hidden text-ellipsis break-keep text-nowrap pr-1">
+
+        {/* 中：标题列表 */}
+        <div className="w-[340px] shrink-0 border-r border-[var(--claude-border)] h-full flex flex-col min-h-0 bg-[var(--claude-paper)]">
+          <div className="px-3.5 py-3.5 border-b border-[var(--claude-border)] shrink-0 space-y-2">
+            <h3 className="text-[15px] font-semibold tracking-tight overflow-hidden text-ellipsis break-keep text-nowrap text-[var(--claude-ink)]">
               {currentMpInfo?.mpName || '全部'}
             </h3>
             {currentMpInfo ? (
-              <div className="flex h-5 items-center space-x-4 text-small">
-                <div className="font-light">
-                  最后更新时间:
-                  {dayjs(currentMpInfo.syncTime * 1e3).format(
-                    'YYYY-MM-DD HH:mm:ss',
-                  )}
-                </div>
-                <Divider orientation="vertical" />
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[var(--claude-muted)]">
+                <span className="font-light">
+                  更新于{' '}
+                  {dayjs(currentMpInfo.syncTime * 1e3).format('MM-DD HH:mm')}
+                </span>
+                <Divider orientation="vertical" className="h-3" />
                 <Tooltip
                   content="频繁调用可能会导致一段时间内不可用"
                   color="danger"
@@ -228,17 +643,17 @@ const Feeds = () => {
                       await queryUtils.article.list.reset();
                     }}
                   >
-                    {isGetArticlesLoading ? '更新中...' : '立即更新'}
+                    {isGetArticlesLoading ? '更新中...' : '更新'}
                   </Link>
                 </Tooltip>
-                <Divider orientation="vertical" />
                 {currentMpInfo.hasHistory === 1 && (
                   <>
+                    <Divider orientation="vertical" className="h-3" />
                     <Tooltip
                       content={
                         inProgressHistoryMp?.id === currentMpInfo.id
                           ? `正在获取第${inProgressHistoryMp.page}页...`
-                          : `历史文章需要分批次拉取，请耐心等候，频繁调用可能会导致一段时间内不可用`
+                          : `历史文章需要分批次拉取，请耐心等候`
                       }
                       color={
                         inProgressHistoryMp?.id === currentMpInfo.id
@@ -274,14 +689,13 @@ const Feeds = () => {
                         }}
                       >
                         {inProgressHistoryMp?.id === currentMpInfo.id
-                          ? `停止获取历史文章`
-                          : `获取历史文章`}
+                          ? `停止历史`
+                          : `历史`}
                       </Link>
                     </Tooltip>
-                    <Divider orientation="vertical" />
                   </>
                 )}
-
+                <Divider orientation="vertical" className="h-3" />
                 <Tooltip content="启用服务端定时更新">
                   <div>
                     <Switch
@@ -300,49 +714,9 @@ const Feeds = () => {
                     ></Switch>
                   </div>
                 </Tooltip>
-                <Divider orientation="vertical" />
-                <Tooltip content="仅删除订阅源，已获取的文章不会被删除">
-                  <Link
-                    href="#"
-                    color="danger"
-                    size="sm"
-                    isDisabled={isDeleteFeedLoading}
-                    onClick={async (ev) => {
-                      ev.preventDefault();
-                      ev.stopPropagation();
-
-                      if (window.confirm('确定删除吗？')) {
-                        await deleteFeed(currentMpInfo.id);
-                        navigate('/feeds');
-                        await refetchFeedList();
-                      }
-                    }}
-                  >
-                    删除
-                  </Link>
-                </Tooltip>
-
-                <Divider orientation="vertical" />
-                <Tooltip
-                  content={
-                    <div>
-                      可添加.atom/.rss/.json格式输出, limit=20&page=1控制分页
-                    </div>
-                  }
-                >
-                  <Link
-                    size="sm"
-                    showAnchorIcon
-                    target="_blank"
-                    href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
-                    color="foreground"
-                  >
-                    RSS
-                  </Link>
-                </Tooltip>
               </div>
             ) : (
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2 text-xs text-[var(--claude-muted)]">
                 <Tooltip
                   content="频繁调用可能会导致一段时间内不可用"
                   color="danger"
@@ -350,6 +724,7 @@ const Feeds = () => {
                   <Link
                     size="sm"
                     href="#"
+                    className="text-[var(--claude-accent)]"
                     isDisabled={
                       isRefreshAllMpArticlesRunning || isGetArticlesLoading
                     }
@@ -368,31 +743,35 @@ const Feeds = () => {
                 </Tooltip>
                 <Link
                   href="#"
-                  color="foreground"
+                  className="text-[var(--claude-muted)]"
                   onClick={handleExportOpml}
                   size="sm"
                 >
                   导出OPML
                 </Link>
-                <Divider orientation="vertical" />
-                <Link
-                  size="sm"
-                  showAnchorIcon
-                  target="_blank"
-                  href={`${serverOriginUrl}/feeds/all.atom`}
-                  color="foreground"
-                >
-                  RSS
-                </Link>
               </div>
             )}
           </div>
-          <div className="p-2 overflow-y-auto">
-            <ArticleList></ArticleList>
+          <div className="flex-1 min-h-0">
+            <ArticleList
+              selectedId={selectedArticle?.id}
+              onSelect={setSelectedArticle}
+            />
           </div>
         </div>
+
+        {/* 右：阅读栏 */}
+        <div className="flex-1 min-w-0 h-full bg-[var(--claude-canvas)]">
+          <ArticleReader article={selectedArticle} />
+        </div>
       </div>
-      <Modal isOpen={isOpen} onOpenChange={onOpenChange}>
+      <Modal
+        isOpen={isOpen}
+        onOpenChange={(open) => {
+          onOpenChange();
+          if (!open) setImportTags([]);
+        }}
+      >
         <ModalContent>
           {(onClose) => (
             <>
@@ -405,9 +784,37 @@ const Feeds = () => {
                   onValueChange={setWxsLink}
                   autoFocus
                   label="分享链接"
-                  placeholder="输入公众号文章分享链接，一行一条，如 https://mp.weixin.qq.com/s/xxxxxx https://mp.weixin.qq.com/s/xxxxxx"
+                  placeholder="输入公众号文章分享链接，一行一条，如 https://mp.weixin.qq.com/s/xxxxxx"
                   variant="bordered"
                 />
+                <div>
+                  <div className="text-sm mb-2 text-[var(--claude-ink)]">
+                    选择标签（可多选）
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
+                    {(tagList || []).map((tag) => {
+                      const on = importTags.includes(tag.name);
+                      return (
+                        <Chip
+                          key={tag.id}
+                          size="sm"
+                          variant={on ? 'solid' : 'bordered'}
+                          color={on ? 'primary' : 'default'}
+                          className="cursor-pointer"
+                          onClick={() =>
+                            toggleNameInList(
+                              importTags,
+                              tag.name,
+                              setImportTags,
+                            )
+                          }
+                        >
+                          {tag.name}
+                        </Chip>
+                      );
+                    })}
+                  </div>
+                </div>
               </ModalBody>
               <ModalFooter>
                 <Button color="danger" variant="flat" onPress={onClose}>
@@ -426,6 +833,57 @@ const Feeds = () => {
                   }
                 >
                   确定
+                </Button>
+              </ModalFooter>
+            </>
+          )}
+        </ModalContent>
+      </Modal>
+
+      {/* 编辑已有公众号标签 */}
+      <Modal isOpen={isTagModalOpen} onOpenChange={onTagModalOpenChange}>
+        <ModalContent>
+          {(onClose) => (
+            <>
+              <ModalHeader className="flex flex-col gap-1">
+                编辑标签
+                {editingFeed ? (
+                  <span className="text-sm font-normal text-[var(--claude-muted)]">
+                    {editingFeed.mpName}
+                  </span>
+                ) : null}
+              </ModalHeader>
+              <ModalBody>
+                <div className="flex flex-wrap gap-1.5 max-h-56 overflow-y-auto">
+                  {(tagList || []).map((tag) => {
+                    const on = editingTags.includes(tag.name);
+                    return (
+                      <Chip
+                        key={tag.id}
+                        size="sm"
+                        variant={on ? 'solid' : 'bordered'}
+                        color={on ? 'primary' : 'default'}
+                        className="cursor-pointer"
+                        onClick={() =>
+                          toggleNameInList(
+                            editingTags,
+                            tag.name,
+                            setEditingTags,
+                          )
+                        }
+                      >
+                        {tag.name}
+                      </Chip>
+                    );
+                  })}
+                </div>
+              </ModalBody>
+              <ModalFooter>
+                <Button color="danger" variant="flat" onPress={onClose}>
+                  取消
+                </Button>
+                <Button color="primary" onPress={handleSaveFeedTags}>
+                  保存
                 </Button>
               </ModalFooter>
             </>
