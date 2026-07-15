@@ -1,61 +1,49 @@
-FROM node:20.16.0-alpine AS base
+# 简化版 Docker 构建：默认 SQLite，适配 Railway / Zeabur 等平台
+FROM node:20.16.0-alpine
+
+RUN apk add --no-cache openssl libc6-compat
+
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
+# 容器内没有 vscode，避免 engine-strict 导致 install 失败
+ENV PNPM_IGNORE_ENGINE=true
 
-RUN npm i -g pnpm
+RUN npm i -g pnpm@9.15.9
 
-FROM base AS build
-COPY . /usr/src/app
 WORKDIR /usr/src/app
 
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
+# 先拷依赖描述，利用层缓存
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY apps/server/package.json ./apps/server/
+COPY apps/web/package.json ./apps/web/
 
-RUN pnpm run -r build
+RUN pnpm install --frozen-lockfile
 
-RUN pnpm deploy --filter=server --prod /app
-RUN pnpm deploy --filter=server --prod /app-sqlite
+COPY . .
 
-RUN cd /app && pnpm exec prisma generate
+# 构建前端（输出到 apps/server/client）+ 后端
+RUN pnpm --filter web build && pnpm --filter server build
 
-RUN cd /app-sqlite && \
-    rm -rf ./prisma && \
-    mv prisma-sqlite prisma && \
-    pnpm exec prisma generate
+WORKDIR /usr/src/app/apps/server
 
-FROM base AS app-sqlite
-COPY --from=build /app-sqlite /app
+# 生成 Prisma Client（当前 prisma 目录为 SQLite schema）
+RUN pnpm exec prisma generate
 
-WORKDIR /app
-
-EXPOSE 4000
+RUN mkdir -p /usr/src/app/apps/server/data \
+  && chmod +x ./docker-bootstrap.sh
 
 ENV NODE_ENV=production
-ENV HOST="0.0.0.0"
-ENV SERVER_ORIGIN_URL=""
-ENV MAX_REQUEST_PER_MINUTE=60
-ENV AUTH_CODE=""
+ENV HOST=0.0.0.0
+ENV PORT=4000
+ENV DATABASE_TYPE=sqlite
 ENV DATABASE_URL="file:../data/wewe-rss.db"
-ENV DATABASE_TYPE="sqlite"
-
-RUN chmod +x ./docker-bootstrap.sh
-
-CMD ["./docker-bootstrap.sh"]
-
-
-FROM base AS app
-COPY --from=build /app /app
-
-WORKDIR /app
+ENV AUTH_CODE=""
+ENV MAX_REQUEST_PER_MINUTE=60
+ENV SERVER_ORIGIN_URL=""
 
 EXPOSE 4000
 
-ENV NODE_ENV=production
-ENV HOST="0.0.0.0"
-ENV SERVER_ORIGIN_URL=""
-ENV MAX_REQUEST_PER_MINUTE=60
-ENV AUTH_CODE=""
-ENV DATABASE_URL=""
-
-RUN chmod +x ./docker-bootstrap.sh
+# 持久化目录：部署平台请挂载 /usr/src/app/apps/server/data
+VOLUME ["/usr/src/app/apps/server/data"]
 
 CMD ["./docker-bootstrap.sh"]

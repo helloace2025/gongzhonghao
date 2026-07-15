@@ -1,8 +1,16 @@
-
 #!/bin/sh
-# ENVIRONEMTN from docker-compose.yaml doesn't get through to subprocesses
-# Need to explicit pass DATABASE_URL here, otherwise migration doesn't work
-# Run migrations
-DATABASE_URL=${DATABASE_URL} npx prisma migrate deploy
-# start app
-DATABASE_URL=${DATABASE_URL} node dist/main
+set -e
+
+cd /usr/src/app/apps/server
+
+# 确保数据目录存在（SQLite 文件写在这里）
+mkdir -p ./data
+
+echo "DATABASE_TYPE=${DATABASE_TYPE:-sqlite}"
+echo "Running prisma migrate deploy..."
+
+# 使用环境变量中的 DATABASE_URL 执行迁移
+npx prisma migrate deploy --schema ./prisma/schema.prisma
+
+echo "Starting server..."
+exec node dist/main
