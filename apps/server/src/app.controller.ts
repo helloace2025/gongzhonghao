@@ -1,4 +1,4 @@
-import { Controller, Get, Response, Render } from '@nestjs/common';
+import { Controller, Get, Response, Render, Res as NestRes } from '@nestjs/common';
 import { AppService } from './app.service';
 import { ConfigService } from '@nestjs/config';
 import { ConfigurationType } from './configuration';
@@ -11,9 +11,10 @@ export class AppController {
     private readonly configService: ConfigService,
   ) {}
 
+  /** 根路径直接进管理台，不再显示过渡页 */
   @Get()
-  getHello(): string {
-    return this.appService.getHello();
+  root(@Response() res: Res) {
+    return res.redirect(302, '/dash');
   }
 
   @Get('/robots.txt')
