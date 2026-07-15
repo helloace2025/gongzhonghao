@@ -11,7 +11,7 @@
   },
   "scripts": {
     "dev": "pnpm run --parallel dev",
-    "build": "pnpm --filter web build && pnpm --filter server build && pnpm --filter server exec prisma generate",
+    "build": "pnpm --filter server exec prisma generate && pnpm --filter web build && pnpm --filter server build",
     "build:server": "pnpm --filter server build",
     "build:web": "pnpm --filter web build",
     "start": "cd apps/server && mkdir -p data && npx prisma migrate deploy && node dist/main",

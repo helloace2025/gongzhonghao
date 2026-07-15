@@ -11,13 +11,13 @@ DATABASE_URL = "file:../data/wewe-rss.db"
 nixPkgs = ["nodejs_20", "openssl"]
 
 [phases.install]
-cmds = ["npm i -g pnpm@9.15.9", "pnpm install --no-frozen-lockfile"]
+cmds = ["npm i -g pnpm@9.15.9", "pnpm install --no-frozen-lockfile --ignore-scripts"]
 
 [phases.build]
 cmds = [
+  "cd apps/server && pnpm exec prisma generate --schema ./prisma/schema.prisma",
   "pnpm --filter web build",
-  "pnpm --filter server build",
-  "cd apps/server && pnpm exec prisma generate"
+  "pnpm --filter server build"
 ]
 
 [start]
