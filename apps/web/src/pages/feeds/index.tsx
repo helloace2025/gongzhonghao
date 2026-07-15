@@ -78,9 +78,22 @@ const Feeds = () => {
     },
   );
 
+  /** 拉文依赖「启用中」的微信读书账号；失效时整页提示 */
+  const { data: accountData } = trpc.account.list.useQuery(
+    {},
+    { refetchOnWindowFocus: true },
+  );
+  const hasEnabledAccount = useMemo(
+    () => (accountData?.items || []).some((a) => a.status === 1),
+    [accountData?.items],
+  );
+
   const navigate = useNavigate();
 
   const queryUtils = trpc.useUtils();
+
+  const errMsg = (e: unknown) =>
+    (e as { message?: string })?.message || '未知错误';
 
   const { mutateAsync: getMpInfo, isLoading: isGetMpInfoLoading } =
     trpc.platform.getMpInfo.useMutation({});
@@ -150,8 +163,12 @@ const Feeds = () => {
     const wxsLinks = wxsLink.split('\n').filter((link) => link.trim() !== '');
     for (const link of wxsLinks) {
       console.log('add wxsLink', link);
-      const res = await getMpInfo({ wxsLink: link });
-      if (res[0]) {
+      try {
+        const res = await getMpInfo({ wxsLink: link });
+        if (!res[0]) {
+          toast.error('添加失败', { description: '请检查链接是否正确' });
+          continue;
+        }
         const item = res[0];
         await addFeed({
           id: item.id,
@@ -162,21 +179,38 @@ const Feeds = () => {
           status: 1,
           tags: importTags,
         });
-        await refreshMpArticles({ mpId: item.id });
-        toast.success('添加成功', {
-          description: `公众号 ${item.name}${
-            importTags.length ? ` · ${importTags.join('、')}` : ''
-          }`,
-        });
+        try {
+          await refreshMpArticles({ mpId: item.id });
+          toast.success('添加成功', {
+            description: `公众号 ${item.name}${
+              importTags.length ? ` · ${importTags.join('、')}` : ''
+            }`,
+          });
+        } catch (refreshErr) {
+          toast.warning('公众号已添加，但文章拉取失败', {
+            description: `${errMsg(refreshErr)}（可到「账号管理」检查读书账号后点更新）`,
+          });
+        }
         await queryUtils.article.list.reset();
-      } else {
-        toast.error('添加失败', { description: '请检查链接是否正确' });
+      } catch (e) {
+        toast.error('添加失败', { description: errMsg(e) });
       }
     }
     refetchFeedList();
     setWxsLink('');
     setImportTags([]);
     onClose();
+  };
+
+  const handleRefreshArticles = async (mpId?: string) => {
+    try {
+      await refreshMpArticles(mpId ? { mpId } : {});
+      await refetchFeedList();
+      await queryUtils.article.list.reset();
+      toast.success(mpId ? '更新完成' : '全部更新已触发');
+    } catch (e) {
+      toast.error('更新失败', { description: errMsg(e) });
+    }
   };
 
   const openEditTags = (feed: FeedItem) => {
@@ -366,7 +400,23 @@ const Feeds = () => {
 
   return (
     <>
-      <div className="h-full flex min-h-0 bg-[var(--claude-canvas)]">
+      <div className="h-full flex flex-col min-h-0 bg-[var(--claude-canvas)]">
+        {!hasEnabledAccount && accountData ? (
+          <div className="shrink-0 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-amber-900 text-[13px] flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span>
+              当前没有可用的微信读书账号，添加/更新公众号将无法拉取文章。
+              请到「账号管理」扫码登录，或把已有账号状态改为启用。
+            </span>
+            <Link
+              size="sm"
+              href="/accounts"
+              className="text-[#07c160] font-medium underline-offset-2"
+            >
+              去账号管理
+            </Link>
+          </div>
+        ) : null}
+        <div className="flex-1 flex min-h-0">
         {/* 左：订阅源栏 */}
         <div className="w-60 shrink-0 border-r border-[var(--claude-border)] p-3 h-full flex flex-col min-h-0 claude-sidebar">
           <div className="pb-3 flex flex-col items-center gap-1.5 shrink-0">
@@ -629,9 +679,7 @@ const Feeds = () => {
                     onClick={async (ev) => {
                       ev.preventDefault();
                       ev.stopPropagation();
-                      await refreshMpArticles({ mpId: currentMpInfo.id });
-                      await refetchFeedList();
-                      await queryUtils.article.list.reset();
+                      await handleRefreshArticles(currentMpInfo.id);
                     }}
                   >
                     {isGetArticlesLoading ? '更新中...' : '更新'}
@@ -722,9 +770,7 @@ const Feeds = () => {
                     onClick={async (ev) => {
                       ev.preventDefault();
                       ev.stopPropagation();
-                      await refreshMpArticles({});
-                      await refetchFeedList();
-                      await queryUtils.article.list.reset();
+                      await handleRefreshArticles();
                     }}
                   >
                     {isRefreshAllMpArticlesRunning || isGetArticlesLoading
@@ -754,6 +800,7 @@ const Feeds = () => {
         {/* 右：阅读栏 */}
         <div className="flex-1 min-w-0 h-full bg-[var(--claude-canvas)]">
           <ArticleReader article={selectedArticle} />
+        </div>
         </div>
       </div>
       <Modal

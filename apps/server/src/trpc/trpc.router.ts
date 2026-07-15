@@ -375,10 +375,24 @@ export class TrpcRouter {
         }),
       )
       .mutation(async ({ input: { mpId } }) => {
-        if (mpId) {
-          await this.trpcService.refreshMpArticlesAndUpdateFeed(mpId);
-        } else {
-          await this.trpcService.refreshAllMpArticlesAndUpdateFeed();
+        try {
+          if (mpId) {
+            await this.trpcService.refreshMpArticlesAndUpdateFeed(mpId);
+          } else {
+            await this.trpcService.refreshAllMpArticlesAndUpdateFeed();
+          }
+          return { ok: true as const };
+        } catch (err: any) {
+          const message =
+            err?.response?.data?.message ||
+            err?.message ||
+            '拉取文章失败';
+          this.logger.error(`refreshArticles failed: ${message}`);
+          throw new TRPCError({
+            code: 'INTERNAL_SERVER_ERROR',
+            message,
+            cause: err?.stack,
+          });
         }
       }),
 

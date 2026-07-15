@@ -13,7 +13,10 @@ const configuration = () => {
 
   const feedMode = process.env.FEED_MODE as 'fulltext' | '';
 
-  const databaseType = process.env.DATABASE_TYPE || 'mysql';
+  // file: URL 一律按 sqlite；未显式指定时默认 mysql（兼容原版）
+  const databaseType =
+    process.env.DATABASE_TYPE ||
+    (process.env.DATABASE_URL?.startsWith('file:') ? 'sqlite' : 'mysql');
 
   const updateDelayTime = parseInt(`${process.env.UPDATE_DELAY_TIME} || 60`);
 

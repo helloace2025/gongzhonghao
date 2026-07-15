@@ -66,29 +66,42 @@ const READER_CSS = `
     display: none !important;
   }
 
-  body { padding: 0; }
+  body { padding: 0; font-weight: 400; font-synthesis: none; }
 
   .wewe-reader-shell {
     min-height: 100%;
-    padding: 16px 16px 48px;
+    padding: 16px 16px 40px;
   }
 
+  /* 纯文字正文：不套厚重「纸卡」，避免文末多出一块空白长方形 */
   .wewe-reader-article {
     max-width: min(720px, 100%);
     width: 100%;
     margin: 0 auto;
-    background: var(--wewe-paper);
-    border: 1px solid var(--wewe-border);
-    border-radius: 16px;
-    padding: 28px 32px 36px;
-    box-shadow: 0 1px 2px rgba(26,25,21,0.04), 0 12px 32px rgba(26,25,21,0.05);
-    /* 正文字重：不要默认加粗 */
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 8px 20px 24px;
+    box-shadow: none;
     font-weight: 400 !important;
+    font-size: 16px;
     color: var(--wewe-text);
+    font-synthesis: none;
   }
 
   .wewe-reader-article,
-  .wewe-reader-article * {
+  .wewe-reader-article p,
+  .wewe-reader-article section,
+  .wewe-reader-article span,
+  .wewe-reader-article li,
+  .wewe-reader-article div,
+  .wewe-reader-article a {
+    font-weight: 400 !important;
+    font-synthesis: none;
+  }
+
+  .wewe-reader-article strong,
+  .wewe-reader-article b {
     font-weight: 400 !important;
   }
 
@@ -103,7 +116,6 @@ const READER_CSS = `
     text-align: left;
   }
 
-  /* 纯文字：左对齐更易读，避免居中导致“假加粗/难看” */
   .wewe-reader-article,
   .wewe-reader-article p,
   .wewe-reader-article section,
@@ -115,8 +127,8 @@ const READER_CSS = `
 
   .wewe-reader-article p,
   .wewe-reader-article section {
-    margin: 0.85em 0;
-    line-height: 1.9;
+    margin: 0.75em 0;
+    line-height: 1.85;
   }
 
   .wewe-reader-article a {
@@ -137,6 +149,12 @@ const READER_CSS = `
     display: none !important;
   }
 
+  /* 纯文字文：隐藏空卡片、空 section 白块 */
+  .wewe-reader-article .wewe-link-card:not(:has(*:not(:empty))),
+  .wewe-reader-article section:not(:has(img, video, iframe, table, pre, a)):not(:has(:not(:empty))) {
+    display: none !important;
+  }
+
   .wewe-reader-article img,
   .wewe-reader-article .wewe-img {
     display: block !important;
@@ -147,8 +165,13 @@ const READER_CSS = `
     margin: 18px auto !important;
     border-radius: 12px;
     object-fit: contain !important;
-    background: #f0eee6;
-    box-shadow: 0 2px 10px rgba(26, 25, 21, 0.05);
+    background: transparent;
+    box-shadow: none;
+  }
+
+  /* 图片加载失败时不留灰底方块 */
+  .wewe-reader-article img.wewe-img-broken {
+    display: none !important;
   }
 
   video {
@@ -210,9 +233,15 @@ const READER_CSS = `
     margin: 18px auto;
     border: 1px solid var(--wewe-border);
     border-radius: 12px;
-    background: #fff;
+    background: var(--wewe-paper);
     overflow: hidden;
-    box-shadow: 0 2px 8px rgba(26, 25, 21, 0.04);
+    box-shadow: none;
+  }
+
+  /* 链接卡片若几乎无文字，直接隐藏（避免文末空长方形） */
+  .wewe-link-card:has(.wewe-link-card__anchor:empty),
+  .wewe-link-card:has(.wewe-link-card__title:empty):has(.wewe-link-card__desc:empty) {
+    display: none !important;
   }
 
   .wewe-link-card__anchor {
@@ -304,7 +333,7 @@ const ArticleReader: FC<Props> = ({ article }) => {
         const base = serverOriginUrl || '';
         // bust cache after reader pipeline upgrade
         const res = await fetch(
-          `${base}/articles/${article.id}/content?v=4`,
+          `${base}/articles/${article.id}/content?v=6`,
           {
             signal: controller.signal,
           },
@@ -331,8 +360,11 @@ const ArticleReader: FC<Props> = ({ article }) => {
     };
   }, [article?.id]);
 
+  const plainTextLen = (html: string) =>
+    html.replace(/<[^>]+>/g, '').replace(/\s+/g, '').length;
+
   const srcDoc = useMemo(() => {
-    if (!data?.content) return '';
+    if (!data?.content || plainTextLen(data.content) < 8) return '';
 
     // 后端有时会包一层 html/body，尽量只取正文
     let bodyHtml = data.content;
@@ -341,10 +373,11 @@ const ArticleReader: FC<Props> = ({ article }) => {
       bodyHtml = bodyMatch[1];
     }
     // 去掉后端旧版内联 style 壳，避免和阅读器主题冲突
-    bodyHtml = bodyHtml.replace(
-      /^<html[^>]*>\s*<head>[\s\S]*?<\/head>\s*<body[^>]*>/i,
-      '',
-    );
+    bodyHtml = bodyHtml
+      .replace(/^<html[^>]*>\s*<head>[\s\S]*?<\/head>\s*<body[^>]*>/i, '')
+      .replace(/<\/body>\s*<\/html>\s*$/i, '');
+
+    if (plainTextLen(bodyHtml) < 8) return '';
 
     return `<!DOCTYPE html>
 <html>
@@ -356,10 +389,35 @@ const ArticleReader: FC<Props> = ({ article }) => {
 </head>
 <body>
   <div class="wewe-reader-shell">
-    <article class="wewe-reader-article">
+    <article class="wewe-reader-article wewe-text-only">
       ${bodyHtml}
     </article>
   </div>
+  <script>
+    (function () {
+      // 隐藏裂图，避免灰/白方块
+      document.querySelectorAll('img').forEach(function (img) {
+        img.addEventListener('error', function () {
+          img.classList.add('wewe-img-broken');
+          img.removeAttribute('src');
+        });
+        if (img.complete && img.naturalWidth === 0 && img.src) {
+          img.classList.add('wewe-img-broken');
+        }
+      });
+      // 去掉文末无文字的空块（纯文字文章常见）
+      function scrub() {
+        document.querySelectorAll('section, div, p, .wewe-link-card').forEach(function (el) {
+          if (el.closest('pre')) return;
+          var text = (el.textContent || '').replace(/[\\u200b\\s]/g, '');
+          var hasMedia = el.querySelector('img, video, iframe, pre, table, a[href]');
+          if (!text && !hasMedia) el.remove();
+        });
+      }
+      scrub();
+      setTimeout(scrub, 50);
+    })();
+  </script>
 </body>
 </html>`;
   }, [data?.content]);
@@ -372,16 +430,24 @@ const ArticleReader: FC<Props> = ({ article }) => {
     );
   }
 
-  const title = data?.title || article.title;
+  // 微信读书/纯文字文有时把整段正文塞进 title，标题只取首行
+  const rawTitle = data?.title || article.title || '';
+  const title =
+    rawTitle
+      .split(/\n+/)
+      .map((s) => s.trim())
+      .find(Boolean)
+      ?.slice(0, 120) || rawTitle.slice(0, 120);
   const publishTime = data?.publishTime || article.publishTime;
   const sourceUrl =
     data?.sourceUrl || `https://mp.weixin.qq.com/s/${article.id}`;
+  const hasBody = Boolean(srcDoc);
 
   return (
     <div className="h-full flex flex-col min-w-0 bg-[var(--claude-canvas)]">
       <div className="px-4 py-3 border-b border-[var(--claude-border)] flex items-start gap-3 shrink-0 bg-[var(--claude-paper)]">
         <div className="flex-1 min-w-0">
-          <h2 className="text-[15px] font-semibold leading-snug break-words tracking-tight text-[var(--claude-ink)]">
+          <h2 className="text-[15px] font-medium leading-snug break-words tracking-tight text-[var(--claude-ink)]">
             {title}
           </h2>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--claude-muted)]">
@@ -421,13 +487,24 @@ const ArticleReader: FC<Props> = ({ article }) => {
           </div>
         ) : null}
 
-        {!loading && !error && data ? (
+        {!loading && !error && data && hasBody ? (
           <iframe
             title={title}
             className="w-full h-full border-0 bg-[var(--claude-canvas)]"
-            sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+            sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-scripts"
             srcDoc={srcDoc}
           />
+        ) : null}
+
+        {!loading && !error && data && !hasBody ? (
+          <div className="h-full flex flex-col items-center justify-center gap-3 px-8 text-center">
+            <p className="text-sm text-[var(--claude-muted)] font-normal leading-relaxed max-w-md">
+              未能解析正文（常见于纯文字或特殊版式文章）。请打开微信原文阅读。
+            </p>
+            <Link href={sourceUrl} target="_blank" showAnchorIcon>
+              打开原文
+            </Link>
+          </div>
         ) : null}
       </div>
     </div>

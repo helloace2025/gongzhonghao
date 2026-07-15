@@ -576,12 +576,82 @@ export class FeedsService {
     return content;
   }
 
+  /**
+   * 微信「纯文字/特殊版式」文章（item_show_type=10 等）没有 #js_content，
+   * 正文在页面脚本的 content_noencode 字段里（含 \x0a、\x3c 等转义）。
+   */
+  extractWechatContentNoencode(rawHtml: string): string {
+    if (!rawHtml) return '';
+    const m =
+      rawHtml.match(/content_noencode\s*:\s*'((?:\\'|[^'])*)'/) ||
+      rawHtml.match(/content_noencode\s*:\s*"((?:\\"|[^"])*)"/);
+    if (!m?.[1]) return '';
+
+    let text = m[1]
+      .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) =>
+        String.fromCharCode(parseInt(hex, 16)),
+      )
+      .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+        String.fromCharCode(parseInt(hex, 16)),
+      )
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '')
+      .replace(/\\t/g, '\t')
+      .replace(/\\'/g, "'")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\');
+
+    // 去掉 script，按空行分段成正常正文（可含内联 a 等标签）
+    let safe = text.replace(/<script[\s\S]*?<\/script>/gi, '');
+    const paragraphs = safe
+      .split(/\n{2,}/)
+      .map((p) => p.replace(/\n/g, '').trim())
+      .filter(Boolean);
+    if (!paragraphs.length) {
+      const one = safe.replace(/\s+/g, ' ').trim();
+      return one
+        ? /<\/?[a-z]/i.test(one)
+          ? `<p>${one}</p>`
+          : `<p>${this.escapeHtml(one)}</p>`
+        : '';
+    }
+    return paragraphs
+      .map((p) => {
+        // 已含标签则保留（微信纯文字里常见内嵌 a），否则转义后包段落
+        if (/<\/?[a-z][\s\S]*>/i.test(p)) {
+          return `<p>${p}</p>`;
+        }
+        return `<p>${this.escapeHtml(p)}</p>`;
+      })
+      .join('');
+  }
+
+  private escapeHtml(s: string) {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /** 统计可读中文/正文长度（忽略 style/script 与标签） */
+  private readableTextLen(html: string) {
+    if (!html) return 0;
+    return html
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/\s+/g, '')
+      .trim().length;
+  }
+
   /** 阅读器专用：始终清洗正文 HTML，并改写图片到本地代理 */
   async getReaderContent(id: string) {
-    // v4：纯文字排版：去空壳长条、取消默认加粗
-    const cacheKey = `reader:v4:${id}`;
+    // v6：content_noencode 分段段落；去空壳白块；正常字重
+    const cacheKey = `reader:v6:${id}`;
     const cached = mpCache.get(cacheKey);
-    if (cached) {
+    if (cached !== undefined) {
       return cached;
     }
 
@@ -589,22 +659,58 @@ export class FeedsService {
     try {
       const rawHtml = await this.request(url, { responseType: 'text' }).text();
       let cleaned = this.prepareReaderHtml(rawHtml);
-      if (!cleaned || cleaned.replace(/<[^>]+>/g, '').trim().length < 20) {
-        // 回退到旧清洗逻辑
-        cleaned = await this.cleanHtml(rawHtml);
+
+      if (this.readableTextLen(cleaned) < 20) {
+        const legacy = await this.cleanHtml(rawHtml);
+        if (this.readableTextLen(legacy) >= 20) {
+          cleaned = legacy;
+        }
       }
-      if (!cleaned || cleaned.replace(/<[^>]+>/g, '').trim().length < 20) {
-        const fallback =
-          '<p class="wewe-empty">正文解析失败，请点击右上角在微信原文中查看。</p>';
-        mpCache.set(cacheKey, fallback);
-        return fallback;
+
+      if (this.readableTextLen(cleaned) < 20) {
+        // 纯文字/特殊版式：从 content_noencode 还原
+        const plain = this.extractWechatContentNoencode(rawHtml);
+        if (this.readableTextLen(plain) >= 20) {
+          cleaned = plain;
+          this.logger.log(
+            `getReaderContent(${id}) using content_noencode fallback, len=${plain.length}`,
+          );
+        }
       }
+
+      if (this.readableTextLen(cleaned) < 20) {
+        // 空内容：不返回装饰性空壳，前端据此隐藏白块
+        mpCache.set(cacheKey, '');
+        return '';
+      }
+
       cleaned = this.rewriteMediaForReader(cleaned);
+      // rewriteMediaForReader 可能包一层 html/body，这里再剥回正文，避免双层纸卡
+      const $ = load(cleaned, { decodeEntities: false });
+      const bodyHtml = $('body').length ? $('body').html() || cleaned : cleaned;
+      // 去掉仅剩的空壳
+      const $body = load(`<div id="r">${bodyHtml}</div>`, {
+        decodeEntities: false,
+      });
+      $body('#r')
+        .find('section, div, p, span, .wewe-link-card')
+        .each((_, el) => {
+          const node = $body(el);
+          if (node.closest('pre').length) return;
+          const t = (node.text() || '').replace(/\u200b|\s/g, '');
+          const hasMedia =
+            node.find('img, video, iframe, pre, table, a').length > 0;
+          if (!t && !hasMedia) node.remove();
+        });
+      // 去掉纯 style 残留
+      $body('#r').find('style').remove();
+      cleaned = $body('#r').html() || bodyHtml;
+
       mpCache.set(cacheKey, cleaned);
       return cleaned;
     } catch (e: any) {
       this.logger.error(`getReaderContent(${url}) error: ${e.message}`);
-      return '<p class="wewe-empty">获取全文失败，请稍后重试或打开原文。</p>';
+      return '';
     }
   }
 

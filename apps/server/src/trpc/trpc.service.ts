@@ -126,7 +126,16 @@ export class TrpcService {
     });
 
     if (!account || account.length === 0) {
-      throw new Error('暂无可用读书账号!');
+      // 区分：库里完全没有账号 vs 全部被禁用
+      const total = await this.prismaService.account.count();
+      if (total === 0) {
+        throw new Error(
+          '暂无可用读书账号：请先到「账号管理」扫码登录微信读书',
+        );
+      }
+      throw new Error(
+        '暂无可用读书账号：当前账号已失效或被禁用，请到「账号管理」重新扫码登录，或把状态改回启用',
+      );
     }
 
     return account[Math.floor(Math.random() * account.length)];
@@ -155,15 +164,32 @@ export class TrpcService {
         })
         .then((res) => res.data)
         .then((res) => {
+          // 接口偶发返回非数组（错误体），按失败处理
+          if (!Array.isArray(res)) {
+            throw new Error(
+              `读书接口返回异常: ${typeof res === 'object' ? JSON.stringify(res).slice(0, 200) : String(res)}`,
+            );
+          }
           this.logger.log(
             `getMpArticles(${mpId}) page: ${page} articles: ${res.length}`,
           );
           return res;
         });
+
+      // 第 1 页空列表多半是平台抖动/限流，不是真的没有文章 —— 自动重试
+      if (page === 1 && res.length === 0 && retryCount > 0) {
+        this.logger.warn(
+          `getMpArticles(${mpId}) empty page=1, retry left=${retryCount}`,
+        );
+        await new Promise((r) => setTimeout(r, 1500));
+        return this.getMpArticles(mpId, page, retryCount - 1);
+      }
+
       return res;
     } catch (err) {
       this.logger.error(`retry(${4 - retryCount}) getMpArticles  error: `, err);
       if (retryCount > 0) {
+        await new Promise((r) => setTimeout(r, 1000));
         return this.getMpArticles(mpId, page, retryCount - 1);
       } else {
         throw err;
@@ -173,6 +199,16 @@ export class TrpcService {
 
   async refreshMpArticlesAndUpdateFeed(mpId: string, page = 1) {
     const articles = await this.getMpArticles(mpId, page);
+
+    // page>1 的空列表 = 历史拉完；page=1 仍空 = 拉取失败，不能当成功
+    if (page === 1 && articles.length === 0) {
+      this.logger.error(
+        `refreshMpArticlesAndUpdateFeed(${mpId}) still empty after retries`,
+      );
+      throw new Error(
+        '未拉取到文章，微信读书接口暂时返回空列表，请稍后再点「更新」',
+      );
+    }
 
     if (articles.length > 0) {
       let results;
@@ -210,6 +246,7 @@ export class TrpcService {
     }
 
     // 如果文章数量小于 defaultCount，则认为没有更多历史文章
+    // 注意：仅在本次真的拿到列表时更新 hasHistory，避免空响应误判
     const hasHistory = articles.length < defaultCount ? 0 : 1;
 
     await this.prismaService.feed.update({

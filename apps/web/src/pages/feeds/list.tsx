@@ -71,13 +71,17 @@ const ArticleList: FC<Props> = ({ selectedId, onSelect }) => {
                     }`}
                   >
                     <div
-                      className={`text-[13.5px] leading-snug line-clamp-2 tracking-tight ${
+                      className={`text-[13.5px] leading-snug line-clamp-2 tracking-tight font-normal ${
                         active
-                          ? 'font-medium text-[var(--claude-accent)]'
+                          ? 'text-[var(--claude-accent)]'
                           : 'text-[var(--claude-ink)]'
                       }`}
                     >
-                      {item.title}
+                      {/* 部分公众号把首段塞进 title，列表只展示首行 */}
+                      {item.title
+                        .split(/\n+/)
+                        .map((s) => s.trim())
+                        .find(Boolean) || item.title}
                     </div>
                     <div className="mt-1.5 text-[11px] text-[var(--claude-muted)]">
                       {dayjs(item.publishTime * 1e3).format(
